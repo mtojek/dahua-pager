@@ -1,0 +1,12 @@
+[package]
+name = "pager-macos"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+minifb = "0.29.0"
+embedded-graphics.workspace = true
+pager-core.workspace = true
+pager-ui.workspace = true
+rodio = { version = "0.23.0", default-features = false, features = ["playback"] }

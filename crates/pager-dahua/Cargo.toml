@@ -1,0 +1,14 @@
+[package]
+name = "pager-dahua"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+reqwest = { version = "0.13.5", default-features = false, features = ["blocking", "rustls"] }
+digest_auth = "0.3.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+rustls = "0.23"

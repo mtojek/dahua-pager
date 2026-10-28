@@ -29,11 +29,13 @@ Three **global** modes, distinct from individual event lifecycle states:
 | `DISARMED` | No | No | No |
 
 - `SILENCE` immediately stops current audio and switches `ARMED → SILENCED`. New events in `SILENCED` still appear in the queue and history but never restart the siren.
-- `DISARMED` ignores incoming detections and does not create new records. Existing history remains available. The device may maintain an NVR connection for readiness, but it must not process detections while disarmed.
+- `DISARMED` stops current audio and ignores new detections without creating new records. Existing alarms and history remain available. The connection may remain open, and lifecycle messages may finish existing records without creating new alarms.
 - Switching back to `ARMED` enables sound for **future** new alarms, not historical events.
-- An audible alarm automatically stops after **5 minutes**, but its entry stays visible until manually closed. **Decision to confirm:** whether the 5-minute audio timeout also changes the global mode to `SILENCED` or only silences the current audio episode. Initial implementation should keep the mode `ARMED` and stop only the current audio episode; future distinct events may sound again.
+- **Accepted audio behavior:** use a loud, repeating pager pattern intended to wake the user at night (initial pattern: three beeps followed by a two-second pause). Provide configurable volume and a sound-test action; validate the pattern and loudness on real hardware.
+- Audio runs in a global episode lasting at most **5 minutes**, measured from its first qualifying alarm. New alarms received during playback join that episode without restarting or extending its deadline. NVR Stop messages do not silence it. At timeout, retire all sound requests from that episode and keep mode `ARMED`; a distinct new alarm may start a new episode. Existing queue entries do not restart audio.
 - `CLOSE` dismisses only the currently displayed alarm from the active queue; it never deletes its persisted history record. An alarm stays on screen until manually closed even if the NVR event has ended.
-- Schedule controls global arming/disarming; manually silenced mode must have a documented precedence rule. Proposed: `SILENCED` persists until manual rearm or the next scheduled transition into an armed period.
+- `CLOSE` also removes that alarm's sound request. Playback continues if other alarms in the current audio episode still require it; otherwise it stops. Navigation never acknowledges or silences an alarm.
+- Schedule controls global arming/disarming. Use the simple precedence rule in section 8; scheduled arming or manual rearming enables sound only for future alarms.
 
 ## 4. NVR event ingestion
 
@@ -41,11 +43,12 @@ Three **global** modes, distinct from individual event lifecycle states:
 - Support **6 cameras** in the initial configuration, identified by NVR channel and friendly label.
 - Discover or configure available event types and object classifications (person, vehicle); do not hard-code unsupported Dahua capabilities.
 - Capture representative **real** NVR event payloads early. Confirm event start/stop semantics, channel IDs, object classification, object coordinates/bounding boxes, and event identifiers. The endpoint alone does **not** guarantee positional metadata.
-- If the event stream lacks reliable object coordinates, implement an explicit alternative integration or restrict spatial filtering to NVR-defined IVS zones; do not pretend that event-only notifications can locate an object on a 32 × 20 grid.
+- Resolve the exact protocol and coordinate source during the NVR integration task. The supplied VideoMotion Start/Stop sample contains channel, region and time information, but no explicit object geometry or person/vehicle classification. Capture additional messages/endpoints as needed. The pager's own 32 × 20 grid remains the target; replacing it with NVR-defined IVS zones requires a separately accepted scope change.
 - Separate transport parsing from normalized events: camera ID, event type, object type, timestamp, phase, optional event/object ID, optional normalized bounding box or polygon, and raw metadata for diagnostics.
 - Preserve the order in which events are received from the API for alarm ordering, with a monotonically increasing local sequence number.
 - Network interruption must not freeze UI. Expose disconnected/reconnecting status.
 - Never store NVR credentials in logs or event history.
+- Never publish real configuration, camera/location names, device identifiers or raw private NVR responses. Use neutral synthetic location names (Backyard, Garage, Pool, etc.) and anonymized fixtures in code, tests, documentation and shared output. Keep live configuration and captures local and gitignored.
 
 ## 5. Zone configuration
 
@@ -61,13 +64,15 @@ Three **global** modes, distinct from individual event lifecycle states:
 
 - Multiple cameras can produce overlapping alarms. The **first received qualifying event** is the first active alarm displayed; subsequent qualifying events are queued in arrival order.
 - Show exactly one camera snapshot/alarm at a time; `PREV` and `NEXT` navigate the active alarm list without changing global mode.
-- Each new logical alarm episode creates one history record and captures **one snapshot at its start**. Do not repeatedly capture or save snapshots while the same episode remains active/ringing.
+- Each new logical detection episode creates one history record and starts one snapshot request immediately, independently of the global audio episode. This does not guarantee an image from the exact detection instant. Do not repeatedly capture snapshots for updates to the same detection episode. A failed request must not block the alarm or metadata record; show an image placeholder and persist the failure status.
 - Distinguish NVR `Start`/`Stop` or equivalent transitions, and deduplicate repeated updates for the same camera/object/event. Define a bounded fallback deduplication window for events without reliable IDs or stop messages.
 - A distinct alarm from another camera is always eligible for its own record and snapshot, even while an earlier alarm is sounding or displayed.
-- Persist at least: unique ID, local sequence, camera/channel, classification, event type, UTC start time, optional end time, zone/cell match, snapshot path, and acknowledgement/close state.
+- Persist at least: unique ID, local sequence, camera/channel, classification, event type, optional UTC start/end times with source and trust status, boot/session ID and monotonic start time when UTC is unknown, zone/cell match, optional snapshot path and retrieval status, and acknowledgement/close state.
 - Persist history on microSD (macOS: local directory), and provide an on-device history browser with snapshot, date/time, and camera.
 - Use atomic writes where possible (temporary file + rename), validate files at startup, and tolerate abrupt power loss or a missing/full SD card.
 - Retention: configurable maximum storage bytes and/or number of records; prune **oldest complete records and their snapshots** first. Reserve free space for new alarms and avoid deleting active/in-progress records. Provide diagnostics if storage is unavailable.
+- Start SD cleanup at **90% filesystem occupancy**. Proposed implementation defaults: clean down to 85%; macOS uses an artificial configurable directory budget of 1 GiB with the same thresholds. Only delete pager-owned records and snapshots. Check capacity before writes, including temporary files; if protected records or other files prevent cleanup, report degraded persistence and continue alarming without claiming successful saves.
+- The disk threshold does not bound the RAM queue. Proposed default for review before implementation: 128 unclosed alarms; preserve existing entries, count and visibly report overflow, and continue processing sound and history for new qualifying detections where resources permit. All ingestion, snapshot and storage work queues must also have explicit bounded capacities and documented overflow behavior.
 - Prefer an append-friendly metadata index or per-event JSON records over rewriting one large history JSON file for every alarm. The main configuration file remains pretty-printed JSON.
 
 ## 7. UI and controls
@@ -92,6 +97,7 @@ Physical mapping:
 - Touch: open alarm details, select cameras, edit grid, navigate settings/history.
 - Joystick: navigate menus and grid editing; map its click if present.
 - Display current global mode prominently and provide an explicit way to select `ARMED`, `SILENCED`, or `DISARMED` in a menu. Confirm whether a long press should be a quick disarm shortcut.
+- Settings include alarm volume and a **Test sound** action, plus schedule enable/disable and weekly time-window editing.
 - Avoid accidental destructive changes: closing an alarm must not erase its history.
 
 Screens: main/status, active alarms, alarm detail/snapshot, history list/detail, per-camera zone editor, schedule, settings/connection diagnostics.
@@ -99,16 +105,20 @@ Screens: main/status, active alarms, alarm detail/snapshot, history list/detail,
 ## 8. Scheduling and clock
 
 - One **global** weekly schedule shared by all 6 cameras, with one or more armed time windows per day.
-- Allow manual mode selection independently of schedule; define deterministic precedence and show whether current mode is manual or schedule-derived.
+- Proposed simple schedule behavior: expose one enable/disable switch and weekly windows. With the schedule disabled, mode changes are manual. With it enabled, a manual mode lasts until the next actual scheduled armed/disarmed transition; consecutive/overlapping windows are merged. Show the mode source and next transition in the UI. No selectable precedence policies in the initial version.
 - Synchronize ESP32 time via NTP/SNTP (default `pool.ntp.org`, configurable). Use `Europe/Warsaw` as the default display timezone and handle DST correctly.
-- Persist timestamps in UTC and render local time in the UI.
-- On startup without valid time, continue networking/monitoring as allowed but mark timestamps as untrusted; reconcile or annotate them after synchronization. Do not fabricate accurate wall-clock timestamps.
+- Persist known timestamps in UTC and render local time in the UI. Use NVR `UTC` as a provisional clock source when internet/NTP is unavailable, recording the source and trust level. Verify freshness and field semantics in integration; the supplied sample has advancing `UTC` while `RealUTC` remains constant between Start and Stop. Do not assume those fields are interchangeable.
+- Use a monotonic clock for audio deadlines, deduplication and backoff; wall-clock synchronization must not extend audio playback. Preserve unknown timestamps as unknown, with session/monotonic context, rather than inventing UTC.
+- Proposed startup default before any usable wall clock: monitor in `ARMED`, visibly mark the time unavailable and defer schedule evaluation. Make the fallback mode configurable. Apply the current scheduled state when usable time becomes available, without replaying missed transitions or sounding historical alarms. Validate timezone/DST and clock-correction behavior during the scheduling stage.
 - macOS uses the system clock through the same clock interface; tests use an injected deterministic fake clock.
 
 ## 9. Configuration and storage
 
+- Dahua event and snapshot CGI paths are protocol constants in the communication module, not user configuration.
+- Discover camera indices and names from NVR ChannelTitle at runtime; do not duplicate them in connection configuration. Convert zero-based API channel indices to one-based camera indices; snapshots use the one-based index and events use `index - 1`. Future per-camera zone/filter settings reference the discovered index.
 - Human-readable, **pretty-printed JSON** (`config.json`) on SD for ESP32 and in a local directory on macOS.
-- Configuration covers Wi-Fi SSID/credentials, NVR address/port/auth, 6 camera/channel mappings, selected grid cells, event/object filters, NTP/timezone, schedule, audio/retention limits, and optional snapshot settings.
+- During development, keep NVR credentials in gitignored `config.local.json` (template: `config.example.json`). HTTPS verification is enabled by default; explicit `tls_insecure: true` disables certificate and hostname verification like `curl -k`, as requested. Production configuration remains versioned JSON.
+- Configuration covers Wi-Fi SSID/credentials, NVR address/port/auth, per-camera selected grid cells, event/object filters, NTP/timezone, schedule, audio/retention limits, and optional snapshot settings.
 - Version the configuration schema; validate on startup and display actionable errors. Do not silently overwrite invalid configuration.
 - Save changes atomically and avoid unnecessary SD writes. Do not expose secrets in UI diagnostics or logs.
 - Suggested directories: `config.json`, `history/`, `snapshots/`, `logs/`.
@@ -116,7 +126,7 @@ Screens: main/status, active alarms, alarm detail/snapshot, history list/detail,
 
 ## 10. Rust workspace architecture
 
-Suggested layout (refine after validating embedded toolchain and driver support):
+Suggested layout (start on macOS; refine embedded adapters during the later ESP32 port):
 
 ```text
 crates/
@@ -154,20 +164,28 @@ tests/
 
 ## 12. Milestones
 
-1. **Hardware/API discovery:** verify `crd-esp32` wiring; capture Dahua event payloads and snapshot behavior; prove spatial metadata availability.
-2. **Rust foundation:** workspace, shared models, fake clock, mock NVR, JSON schema, unit-test harness.
-3. **macOS simulator:** pixel-faithful 480 × 320 framebuffer, touch and four buttons, snapshot rendering.
-4. **Detection and zones:** parser, normalized geometry, 32 × 20 editor, per-camera zone matching, tests.
-5. **Alarm workflow:** three global modes, multiple alarms, queue navigation, audio timeout, close behavior, schedule.
-6. **Persistence:** snapshot-at-start, history browser, deduplication, rotation, fault recovery.
-7. **ESP32 port:** display/touch/buttons/joystick, Wi-Fi/NVR, NTP, SD, JPEG, I2S; performance tuning.
-8. **Hardening:** reconnection, long-running soak tests, six-camera concurrency, end-to-end tests, docs.
+Work proceeds on macOS first; ESP32 discovery and porting do not block the desktop app. The user requested communication tests and connection to the real configured NVR before further simulator/UI work. The initial synthetic UI is a prototype, not the main integration path. Each subsequent stage requires explicit acceptance before implementation. Report results and validation at each stage boundary.
+
+| Stage | Scope | Completion / acceptance evidence |
+| --- | --- | --- |
+| 1. Dahua communication tests and live probe (in progress) | Start from the supplied event sample; cover multipart framing, fragmented/chunked transport, heartbeat, Start/Stop, Digest/Basic auth, HTTPS including explicit tls_insecure, failures/timeouts and snapshot retrieval. Provide private local configuration and an explicit live probe. | Automated protocol and local HTTP/HTTPS tests pass. After the user fills config.local.json, verify events and snapshots against the actual NVR; document coordinate/classification and channel-mapping findings. A local mock tests transport behavior; it does not substitute for live validation. |
+| 2. Connect the macOS app to NVR | Use the tested communication layer in a background worker, show connection status and real camera snapshots, and normalize/deduplicate actual detection events. Preserve shared core and renderer. | Configured NVR events drive the UI without blocking it. Missing geometry/classification is shown as unresolved; never invent detections from motion-only metadata. Six camera mappings are verified. |
+| 3. Desktop preview and zones | Mouse/touch and settings navigation; per-camera 32 × 20 zone editor with magnification and coordinate transforms using the verified geometry source. | Real camera previews and editor work at physical display resolution; tests cover geometry and input transforms. |
+| 4. Desktop history and configuration | Pretty JSON configuration, atomic writes, snapshot persistence, history browser and startup recovery. | Alarm metadata survives restart; snapshot failures preserve records; credentials stay out of diagnostics. |
+| 5. Schedule and resilience on macOS | Weekly schedule/settings, time-source handling, storage budgets, 90% cleanup threshold, bounded queues and fault behavior. Confirm proposed defaults before coding. | Tests cover manual overrides, DST, time correction, full storage, protected records, overflow and six-camera load. |
+| 6. ESP32-S3 discovery and port | Inspect crd-esp32 wiring, select Rust stack and drivers, connect shared application/UI to display, touch, buttons, joystick, SD, Wi-Fi and I2S; benchmark JPEG/PSRAM. | Cross-build and hardware smoke tests pass; user checks pager loudness and input responsiveness. Adapt shared interfaces where hardware evidence requires it. |
+| 7. Hardening and delivery | Long-running tests on both platforms, network/power/storage recovery, CI, setup instructions and diagnostics. | Unit/integration/macOS E2E checks and ESP32 cross-build pass; report hardware evidence, resource usage and remaining limitations. |
 
 ## 13. Open questions / validation gates
 
+- **Native audio and reconnect implemented:** macOS audio is generated in-process through rodio/CPAL/CoreAudio. The communication library exposes a background subscription and a monitor command with bounded exponential retry (1–30 seconds), idle-read timeout, cancellation and visible mailbox overflow. Tests cover service errors, dropped and blackholed connections, recovery, healthy long-lived streams and stopping retries. The GUI remains a synthetic prototype pending integration of real detection/zone processing.
+
+
+- **Channel titles verified (2026-10-28):** the read-only ChannelTitle API returned eight channel slots. All six configured camera names match the NVR ignoring ASCII case. Names were compared locally without printing them; camera names are now discovered rather than persisted in the connection config. Extra slots are not treated as proof of connected cameras.
+- **Live communication verified (2026-10-28):** explicit HTTPS/Digest E2E tests passed using the private local configuration with `tls_insecure`. All six configured snapshot channels returned JPEG-marked responses (not saved); the stream delivered three heartbeats and two parsed events. No human rectangles arrived during that observation, so live geometry and visual channel mapping remain unverified. The complete GUI workflow is not covered by this communication check. Real addresses, credentials, names and raw responses are intentionally omitted.
 - **Dahua metadata:** does this exact NVR expose usable object coordinates via `eventManager.cgi`, or is an additional endpoint/stream required?
-- **Audio timeout:** should 5 minutes only stop the current sound, or switch the global mode to `SILENCED`?
-- **Schedule precedence:** confirm whether scheduled arming overrides manual `SILENCED` and/or `DISARMED` at the next transition.
+- **Audio:** behavior in section 3 is accepted; validate actual pattern and volume on the speaker during hardware work.
+- **Proposed defaults:** confirm the simple schedule rule, startup fallback, RAM queue limit, macOS storage budget and cleanup target before their implementation stages. SD cleanup starts at the agreed 90% threshold.
 - **Alarm episodes:** how should repeated Start messages, missing Stop messages, and new detections from the same camera be grouped?
 - **Hardware:** verify exact physical GPIO mapping for bottom/right buttons and Rust peripheral-driver compatibility.
 - **Snapshots:** verify supported Dahua snapshot CGI path, image size, authentication, latency, and whether a snapshot can be retrieved reliably at alarm start.
@@ -177,10 +195,10 @@ tests/
 
 - A single Rust core and shared `embedded-graphics` UI run on macOS simulator and ESP32-S3 at 480 × 320.
 - All six cameras can be configured; their events are processed in arrival order.
-- A detected person/vehicle in enabled cells generates a snapshot-backed history record when monitoring is enabled.
+- A detected person/vehicle in enabled cells generates an alarm and history record when monitoring and storage are available, with one snapshot request at detection start. Snapshot failure is recorded without suppressing the alarm; storage failure is visible and does not suppress sound/UI alarms.
 - Independent camera alarms remain browsable while only one is shown at a time.
 - `SILENCE` stops sound globally without stopping event recording; `DISARMED` stops new event recording.
 - Alarm entries remain visible until `CLOSE`, and closing never deletes historical evidence.
-- Audio stops after 5 minutes without acknowledgement.
+- Repeating pager audio stops within 5 minutes of the global audio episode start; concurrent detections never extend that deadline. SILENCE stops all audio, CLOSE stops it only when no other sound requests remain, and a distinct new alarm after timeout can sound again in ARMED mode.
 - Weekly schedule, NTP clock, pretty JSON configuration, SD storage, and automatic history rotation work.
 - Automated unit, integration, and mock-NVR E2E tests cover normal and failure paths.

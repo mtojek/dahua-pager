@@ -1,0 +1,60 @@
+--myboundary
+Content-Type: text/plain
+Content-Length: 272
+
+Code=VideoMotion;action=Start;index=1;data={
+  "Id": [
+    0
+  ],
+  "LocaleTime": "2026-10-28 19:21:49",
+  "MachineName": "REDACTED",
+  "Name": "Backyard 2",
+  "RealUTC": 1793211709,
+  "RegionName": [
+    "Region1"
+  ],
+  "SmartMotionEnable": true,
+  "UTC": 1793211709.0
+}
+--myboundary
+Content-Type: text/plain
+Content-Length: 9
+
+Heartbeat
+--myboundary
+Content-Type: text/plain
+Content-Length: 271
+
+Code=VideoMotion;action=Stop;index=1;data={
+  "Id": [
+    0
+  ],
+  "LocaleTime": "2026-10-28 19:21:54",
+  "MachineName": "REDACTED",
+  "Name": "Backyard 2",
+  "RealUTC": 1793211709,
+  "RegionName": [
+    "Region1"
+  ],
+  "SmartMotionEnable": true,
+  "UTC": 1793211714.0
+}
+--myboundary
+Content-Type: text/plain
+Content-Length: 269
+
+Code=VideoMotion;action=Stop;index=5;data={
+  "Id": [
+    0
+  ],
+  "LocaleTime": "2026-10-28 19:21:54",
+  "MachineName": "REDACTED",
+  "Name": "Entrance",
+  "RealUTC": 1793211710,
+  "RegionName": [
+    "Region1"
+  ],
+  "SmartMotionEnable": true,
+  "UTC": 1793211714.0
+}
+--myboundary--

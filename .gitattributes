@@ -1,0 +1,2 @@
+# Preserve protocol fixture bytes, including MIME CRLF and JSON LF line endings.
+fixtures/dahua-events/*.multipart -text whitespace=cr-at-eol

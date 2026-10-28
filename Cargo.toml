@@ -1,0 +1,12 @@
+[workspace]
+members = ["crates/pager-core", "crates/pager-ui", "crates/pager-dahua", "apps/pager-macos"]
+resolver = "2"
+
+[workspace.package]
+edition = "2024"
+license = "Apache-2.0"
+
+[workspace.dependencies]
+embedded-graphics = "0.8.2"
+pager-core = { path = "crates/pager-core" }
+pager-ui = { path = "crates/pager-ui" }
