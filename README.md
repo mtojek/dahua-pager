@@ -11,7 +11,8 @@ reconnecting event streams. The desktop UI currently uses simulated alarms.
 cargo run -p pager-macos
 ```
 
-Keys: **1–6** trigger alarms, **←/→** browse, **S** silences, **C** closes,
+Keys: **1–6** trigger alarms, **←/→** browse, **A** acknowledges all received
+alarms, **S** sets QUIET, **C** dismisses an acknowledged alarm,
 **M** changes mode, **Esc** exits. Alarms play through CoreAudio for up to five minutes.
 
 ## Connect to an NVR
@@ -46,4 +47,5 @@ require local configuration and must be run explicitly:
 cargo test -p pager-dahua --test live_nvr -- --ignored --nocapture --test-threads=1
 ```
 
-See [PLAN.md](PLAN.md) for the implementation plan.
+See [PLAN.md](PLAN.md) for the implementation plan and [docs/ui](docs/ui/README.md)
+for screen layouts and navigation.

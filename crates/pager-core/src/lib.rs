@@ -5,7 +5,7 @@ pub const QUEUE_LIMIT: usize = 128;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
     Armed,
-    Silenced,
+    Quiet,
     Disarmed,
 }
 
@@ -14,6 +14,7 @@ pub struct Alarm {
     pub sequence: u64,
     pub camera: u8,
     pub started_ms: u64,
+    pub acknowledged: bool,
     sound_requested: bool,
 }
 
@@ -56,6 +57,7 @@ impl Pager {
             sequence: self.sequence,
             camera,
             started_ms: now,
+            acknowledged: false,
             sound_requested,
         });
         if sound_requested && self.audio_start.is_none() {
@@ -84,6 +86,15 @@ impl Pager {
             self.stop_audio();
         }
         self.mode = mode;
+    }
+
+    /// Acknowledge every alarm received so far without changing the global mode.
+    /// Later detections remain eligible to start a new audio episode.
+    pub fn acknowledge_all(&mut self) {
+        for alarm in &mut self.alarms {
+            alarm.acknowledged = true;
+        }
+        self.stop_audio();
     }
 
     pub fn sounding(&self) -> bool {
@@ -130,10 +141,10 @@ mod tests {
         assert!(!p.sounding());
     }
     #[test]
-    fn silence_and_rearm_do_not_replay_old_alarms() {
+    fn quiet_and_rearm_do_not_replay_old_alarms() {
         let mut p = Pager::default();
         p.detect(0, 0);
-        p.set_mode(Mode::Silenced);
+        p.set_mode(Mode::Quiet);
         p.detect(1, 1);
         assert!(!p.sounding());
         assert_eq!(p.alarms.len(), 2);
@@ -169,5 +180,40 @@ mod tests {
         }
         assert_eq!(p.alarms.len(), QUEUE_LIMIT);
         assert_eq!(p.overflow, 2);
+    }
+
+    #[test]
+    fn ack_covers_all_existing_alarms_but_not_future_detections() {
+        let mut p = Pager::default();
+        p.detect(0, 0);
+        p.detect(1, 10);
+        p.navigate(true);
+        p.acknowledge_all();
+        assert!(!p.sounding());
+        assert_eq!(p.mode, Mode::Armed);
+        assert_eq!(p.alarms.len(), 2);
+        assert!(p.alarms.iter().all(|alarm| alarm.acknowledged));
+        p.acknowledge_all();
+        p.detect(2, 20);
+        assert!(p.sounding());
+        assert!(!p.alarms[2].acknowledged);
+        // Leaving an older acknowledged alarm must not stop the new alarm.
+        p.close();
+        assert!(p.sounding());
+        p.acknowledge_all();
+        assert!(!p.sounding());
+    }
+
+    #[test]
+    fn ack_does_not_change_quiet_mode_or_reenable_audio() {
+        let mut p = Pager::default();
+        p.set_mode(Mode::Quiet);
+        p.detect(0, 0);
+        p.acknowledge_all();
+        p.detect(1, 10);
+        assert_eq!(p.mode, Mode::Quiet);
+        assert!(!p.sounding());
+        assert!(p.alarms[0].acknowledged);
+        assert!(!p.alarms[1].acknowledged);
     }
 }

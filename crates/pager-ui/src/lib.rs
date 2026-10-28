@@ -51,7 +51,7 @@ pub fn render<D: DrawTarget<Color = Rgb565>>(
         &format!(
             "{:?} | DEMO / NO NVR | {}",
             pager.mode,
-            if pager.sounding() { "RINGING" } else { "QUIET" }
+            if pager.sounding() { "RINGING" } else { "IDLE" }
         ),
         10,
         16,
@@ -108,7 +108,7 @@ pub fn render<D: DrawTarget<Color = Rgb565>>(
     }
     label(
         display,
-        "Left/Right: browse  S: silence  C: close  M: mode",
+        "Left/Right: browse  A: ACK all  S: quiet  C: back  M: mode",
         10,
         310,
         Rgb565::WHITE,

@@ -65,11 +65,19 @@ fn main() -> Result<(), Box<dyn Error>> {
                 Key::Key6 => pager.detect(5, now),
                 Key::Left => pager.navigate(false),
                 Key::Right => pager.navigate(true),
-                Key::S => pager.set_mode(Mode::Silenced),
-                Key::C => pager.close(),
+                Key::S => pager.set_mode(Mode::Quiet),
+                Key::A => pager.acknowledge_all(),
+                Key::C
+                    if pager
+                        .alarms
+                        .get(pager.selected)
+                        .is_some_and(|a| a.acknowledged) =>
+                {
+                    pager.close()
+                }
                 Key::M => pager.set_mode(match pager.mode {
-                    Mode::Armed => Mode::Silenced,
-                    Mode::Silenced => Mode::Disarmed,
+                    Mode::Armed => Mode::Quiet,
+                    Mode::Quiet => Mode::Disarmed,
                     Mode::Disarmed => Mode::Armed,
                 }),
                 _ => {}
