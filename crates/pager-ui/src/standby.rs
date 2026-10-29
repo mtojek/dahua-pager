@@ -622,7 +622,7 @@ fn render_area_cameras<D: DrawTarget<Color = Rgb565>>(
             MonoTextStyle::new(&FONT_6X10, SECONDARY),
         )
         .draw(display)?;
-        if i < ui.cameras.len() - 1 && row < CAMERA_VISIBLE_ROWS - 1 {
+        if i < ui.cameras.len() - 1 && row < CAMERA_VISIBLE_ROWS - 1 && i != ui.selected_camera {
             Rectangle::new(Point::new(16, top + 35), Size::new(448, 1))
                 .into_styled(PrimitiveStyle::with_fill(BORDER))
                 .draw(display)?;
@@ -1020,5 +1020,28 @@ mod tests {
         assert!(ui.lcd_click(Point::new(20, 50), &mut pager));
         assert_eq!(ui.selected_camera(), 3);
         assert_eq!(ui.screen, Screen::AreaEditor);
+    }
+
+    #[test]
+    fn selected_camera_row_keeps_its_bottom_border() {
+        let mut ui = Ui::default();
+        let mut pager = Pager::default();
+        ui.set_cameras(
+            (1..=3)
+                .map(|index| AreaCamera::new(index, format!("Camera {index}")))
+                .collect(),
+        );
+        ui.screen = Screen::AreaCameras;
+        ui.apply(Action::NextCamera, &mut pager);
+
+        let mut canvas = Canvas(vec![Rgb565::BLACK; 480 * 320]);
+        ui.render(&mut canvas, &pager, ConnectionStatus::Online, "22:15")
+            .unwrap();
+
+        let bottom_border_y = CAMERA_ROW_TOP + CAMERA_ROW_STEP + CAMERA_ROW_HEIGHT as i32 - 1;
+        assert_eq!(
+            canvas.0[bottom_border_y as usize * 480 + 200],
+            Rgb565::new(8, 28, 31)
+        );
     }
 }
