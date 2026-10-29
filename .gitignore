@@ -25,4 +25,8 @@ rustc-ice-*.txt
 
 # Local NVR credentials and captured private data
 config.local.json
+/config.local.history.json
+/config.local.history/
+*.history.json
+*.history/
 /captures/

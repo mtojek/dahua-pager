@@ -15,6 +15,7 @@ pub const AREA_COLUMNS: usize = 32;
 pub const AREA_ROWS: usize = 20;
 pub const AREA_IMAGE_WIDTH: u32 = 448;
 pub const AREA_IMAGE_HEIGHT: u32 = 252;
+const HISTORY_LIMIT: usize = 1000;
 
 const BACKGROUND: Rgb565 = Rgb565::new(1, 3, 2);
 const BORDER: Rgb565 = Rgb565::new(4, 8, 5);
@@ -24,6 +25,8 @@ const CAMERA_ROW_TOP: i32 = 34;
 const CAMERA_ROW_STEP: i32 = 37;
 const CAMERA_ROW_HEIGHT: u32 = 36;
 const CAMERA_VISIBLE_ROWS: usize = 7;
+const RECENT_CAMERA_X: i32 = 200;
+const RECENT_CAMERA_MAX_CHARS: usize = 23;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Screen {
@@ -128,6 +131,19 @@ pub struct Ui {
     alarm_presentations: BTreeMap<u64, AlarmPresentation>,
     alarm_acknowledged: bool,
     alarm_count: usize,
+    history: Vec<HistoryEntry>,
+    history_selected: usize,
+    history_image: Option<(u64, Vec<Rgb565>)>,
+    history_loading: Option<u64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HistoryEntry {
+    pub id: u64,
+    pub camera_name: String,
+    pub timestamp: String,
+    pub description: String,
+    pub snapshot_file: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -163,6 +179,10 @@ impl Default for Ui {
             alarm_presentations: BTreeMap::new(),
             alarm_acknowledged: false,
             alarm_count: 0,
+            history: Vec::new(),
+            history_selected: 0,
+            history_image: None,
+            history_loading: None,
         }
     }
 }
@@ -191,8 +211,8 @@ impl Ui {
             ],
             Screen::Standby => MAIN_ACTIONS.map(Some),
             Screen::History => [
-                Some(Action::Previous),
-                Some(Action::Next),
+                (self.history_selected > 0).then_some(Action::Previous),
+                (self.history_selected + 1 < self.history.len()).then_some(Action::Next),
                 Some(Action::Back),
                 None,
             ],
@@ -281,6 +301,13 @@ impl Ui {
                 self.screen = Screen::AreaEditor;
                 self.focus = None;
             }
+            Action::Previous if self.screen == Screen::History => {
+                self.history_selected = self.history_selected.saturating_sub(1);
+            }
+            Action::Next if self.screen == Screen::History => {
+                self.history_selected =
+                    (self.history_selected + 1).min(self.history.len().saturating_sub(1));
+            }
             Action::Previous => pager.navigate(false),
             Action::Next => pager.navigate(true),
             Action::PreviousCamera if !self.cameras.is_empty() => {
@@ -309,6 +336,54 @@ impl Ui {
         &self.cameras
     }
 
+    pub fn set_history(&mut self, entries: Vec<HistoryEntry>) {
+        self.history = entries;
+        self.history_selected = self.history.len().saturating_sub(1);
+        self.history_image = None;
+        self.history_loading = None;
+    }
+
+    pub fn history(&self) -> &[HistoryEntry] {
+        &self.history
+    }
+
+    pub fn add_history_entry(&mut self, entry: HistoryEntry) {
+        self.history.push(entry);
+        if self.history.len() > HISTORY_LIMIT {
+            self.history.remove(0);
+        }
+        self.history_selected = self.history.len().saturating_sub(1);
+        self.history_image = None;
+        self.history_loading = None;
+    }
+
+    pub fn selected_history_entry(&self) -> Option<&HistoryEntry> {
+        self.history.get(self.history_selected)
+    }
+
+    pub fn set_history_snapshot(&mut self, id: u64, file_name: String, image: Vec<Rgb565>) {
+        if let Some(entry) = self.history.iter_mut().find(|entry| entry.id == id) {
+            entry.snapshot_file = Some(file_name);
+        }
+        if self
+            .selected_history_entry()
+            .is_some_and(|entry| entry.id == id)
+        {
+            self.history_loading = None;
+            self.history_image = Some((id, image));
+        }
+    }
+
+    pub fn set_history_snapshot_loading(&mut self, id: u64) {
+        self.history_loading = Some(id);
+    }
+
+    pub fn set_history_snapshot_failed(&mut self, id: u64) {
+        if self.history_loading == Some(id) {
+            self.history_loading = None;
+        }
+    }
+
     pub fn sync_alarms(&mut self, pager: &Pager) {
         self.alarm_count = pager.alarms.len();
         for alarm in &pager.alarms {
@@ -332,6 +407,7 @@ impl Ui {
             }
         }
         if pager.alarms.iter().any(|alarm| !alarm.acknowledged) {
+            self.asleep = false;
             if self.screen != Screen::Alarm {
                 self.return_screen = self.screen;
                 self.screen = Screen::Alarm;
@@ -377,6 +453,20 @@ impl Ui {
                     && (rect.bottom as u32) > row as u32 * 8192 / AREA_ROWS as u32
             })
         })
+    }
+
+    pub fn selected_area_cells(&self, camera: u8) -> Vec<(usize, usize)> {
+        self.detection_masks
+            .get(camera as usize)
+            .into_iter()
+            .flat_map(|mask| mask.iter().enumerate())
+            .flat_map(|(row, cells)| {
+                cells
+                    .iter()
+                    .enumerate()
+                    .filter_map(move |(col, selected)| selected.then_some((row, col)))
+            })
+            .collect()
     }
 
     pub fn set_cameras(&mut self, cameras: Vec<AreaCamera>) {
@@ -577,6 +667,13 @@ impl Ui {
                 Alignment::Center,
             )
             .draw(display)?;
+            Text::new(
+                "RECENT EVENTS",
+                Point::new(16, 42),
+                MonoTextStyle::new(&FONT_6X10, SECONDARY),
+            )
+            .draw(display)?;
+            render_recent_events(display, self.history.iter().rev().take(4), 48, 52)?;
         } else {
             Text::with_alignment(
                 match self.screen {
@@ -614,14 +711,52 @@ impl Ui {
                     &self.cameras[self.selected_camera],
                     self.save_error,
                 )?;
-            } else {
-                text(
-                    display,
-                    "No history yet",
-                    Point::new(240, 152),
-                    Alignment::Center,
-                    SECONDARY,
-                )?;
+            } else if self.screen == Screen::History {
+                if self.history.is_empty() {
+                    text(
+                        display,
+                        "No history yet",
+                        Point::new(240, 152),
+                        Alignment::Center,
+                        SECONDARY,
+                    )?;
+                } else {
+                    let entry = &self.history[self.history_selected];
+                    if let Some((_, image)) = self
+                        .history_image
+                        .as_ref()
+                        .filter(|(id, _)| *id == entry.id)
+                    {
+                        render_snapshot(display, image)?;
+                    } else if self.history_loading == Some(entry.id) {
+                        text(
+                            display,
+                            "Loading snapshot...",
+                            Point::new(240, 158),
+                            Alignment::Center,
+                            SECONDARY,
+                        )?;
+                    } else {
+                        render_history_snapshot_unavailable(display)?;
+                    }
+                    Rectangle::new(Point::new(16, 267), Size::new(448, 22))
+                        .into_styled(PrimitiveStyle::with_fill(BACKGROUND))
+                        .draw(display)?;
+                    text(
+                        display,
+                        &entry.timestamp,
+                        Point::new(18, 277),
+                        Alignment::Left,
+                        Rgb565::WHITE,
+                    )?;
+                    text(
+                        display,
+                        &entry.camera_name,
+                        Point::new(18, 287),
+                        Alignment::Left,
+                        SECONDARY,
+                    )?;
+                }
             }
         }
         render_button_legend(display, self)?;
@@ -687,6 +822,96 @@ fn render_button_legend<D: DrawTarget<Color = Rgb565>>(
     Ok(())
 }
 
+fn render_recent_events<'a, D: DrawTarget<Color = Rgb565>>(
+    display: &mut D,
+    entries: impl Iterator<Item = &'a HistoryEntry>,
+    top: i32,
+    row_height: i32,
+) -> Result<(), D::Error> {
+    let entries = entries.collect::<Vec<_>>();
+    if entries.is_empty() {
+        return text(
+            display,
+            "No history yet",
+            Point::new(240, top + 28),
+            Alignment::Center,
+            SECONDARY,
+        );
+    }
+    for (index, entry) in entries.into_iter().enumerate() {
+        let y = top + index as i32 * row_height;
+        let baseline = y + row_height / 2 + 5;
+        text(
+            display,
+            &entry.timestamp,
+            Point::new(16, baseline),
+            Alignment::Left,
+            Rgb565::WHITE,
+        )?;
+        // FONT_9X18 is 9 px per monospace character. The timestamp uses
+        // 19 chars (171 px), so the camera starts at x=200 to leave a 13 px gap.
+        // Its 23-char limit ends at x=407; HUMAN starts at x=419.
+        let camera = entry
+            .camera_name
+            .chars()
+            .take(RECENT_CAMERA_MAX_CHARS)
+            .collect::<String>();
+        text(
+            display,
+            &camera,
+            Point::new(RECENT_CAMERA_X, baseline),
+            Alignment::Left,
+            SECONDARY,
+        )?;
+        let description = if entry.description.eq_ignore_ascii_case("human detected") {
+            "Human"
+        } else {
+            entry.description.as_str()
+        };
+        text(
+            display,
+            description,
+            Point::new(464, baseline),
+            Alignment::Right,
+            SECONDARY,
+        )?;
+        if index + 1 < 4 && row_height > 30 {
+            Rectangle::new(Point::new(16, y + row_height - 1), Size::new(448, 1))
+                .into_styled(PrimitiveStyle::with_fill(BORDER))
+                .draw(display)?;
+        }
+    }
+    Ok(())
+}
+
+fn render_snapshot<D: DrawTarget<Color = Rgb565>>(
+    display: &mut D,
+    image: &[Rgb565],
+) -> Result<(), D::Error> {
+    for y in 0..AREA_IMAGE_HEIGHT as usize {
+        for x in 0..AREA_IMAGE_WIDTH as usize {
+            Pixel(
+                Point::new(16 + x as i32, 36 + y as i32),
+                image[y * AREA_IMAGE_WIDTH as usize + x],
+            )
+            .draw(display)?;
+        }
+    }
+    Ok(())
+}
+
+fn render_history_snapshot_unavailable<D: DrawTarget<Color = Rgb565>>(
+    display: &mut D,
+) -> Result<(), D::Error> {
+    text(
+        display,
+        "Snapshot unavailable",
+        Point::new(240, 158),
+        Alignment::Center,
+        SECONDARY,
+    )
+}
+
 fn render_alarm<D: DrawTarget<Color = Rgb565>>(
     display: &mut D,
     ui: &Ui,
@@ -718,7 +943,7 @@ fn render_alarm<D: DrawTarget<Color = Rgb565>>(
         }
     } else {
         let message = match presentation {
-            Some(p) if p.snapshot_loading => "Loading snapshot...",
+            Some(p) if p.snapshot_loading => "Downloading snapshot...",
             Some(p) if p.snapshot_error => "Snapshot unavailable",
             _ => "Snapshot unavailable",
         };
@@ -1228,6 +1453,45 @@ mod tests {
         )
         .unwrap();
         assert_eq!(settings_canvas.0[308 * 480 + 418], Rgb565::new(28, 6, 5));
+    }
+
+    #[test]
+    fn recent_event_date_camera_and_description_columns_do_not_overlap() {
+        let mut ui = Ui::default();
+        ui.set_history(vec![HistoryEntry {
+            id: 1,
+            timestamp: "2026-10-28 19:38:27".into(),
+            camera_name: "North Entrance Camera LongName".into(),
+            description: "Human".into(),
+            snapshot_file: None,
+        }]);
+        let mut canvas = Canvas(vec![BACKGROUND; 480 * 320]);
+        ui.render(
+            &mut canvas,
+            &Pager::default(),
+            ConnectionStatus::Online,
+            "22:15",
+        )
+        .unwrap();
+
+        let row_pixels = |color: Rgb565, start_x: usize, end_x: usize| {
+            (60..88)
+                .flat_map(|y| (start_x..end_x).map(move |x| (x, y)))
+                .filter(|(x, y)| canvas.0[y * 480 + x] == color)
+                .map(|(x, _)| x)
+                .collect::<Vec<_>>()
+        };
+        let date = row_pixels(Rgb565::WHITE, 16, 200);
+        let camera = row_pixels(SECONDARY, 190, 410);
+        let description = row_pixels(SECONDARY, 410, 464);
+
+        assert!(!date.is_empty());
+        assert!(date.iter().max().unwrap() < &190);
+        assert!(!camera.is_empty());
+        assert!(*camera.iter().min().unwrap() >= RECENT_CAMERA_X as usize);
+        assert!(camera.iter().max().unwrap() < &410);
+        assert!(!description.is_empty());
+        assert!(description.iter().min().unwrap() >= &419);
     }
 
     #[test]

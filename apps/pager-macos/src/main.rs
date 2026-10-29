@@ -8,7 +8,7 @@ use pager_dahua::{
 };
 use pager_ui::{
     AREA_COLUMNS, AREA_IMAGE_HEIGHT, AREA_IMAGE_WIDTH, AREA_ROWS, Action, AreaCamera,
-    ConnectionStatus, HEIGHT, Ui, WIDTH,
+    ConnectionStatus, HEIGHT, HistoryEntry, Ui, WIDTH,
 };
 use rand::Rng;
 use std::{
@@ -28,6 +28,8 @@ use network::NetworkPath;
 
 mod audio;
 use audio::Audio;
+mod history;
+use history::EventHistory;
 
 fn log(level: &str, message: impl std::fmt::Display) {
     eprintln!(
@@ -282,7 +284,7 @@ fn start_alarm_snapshot_worker(
     client: DahuaClient,
 ) -> (
     SyncSender<(u64, u32)>,
-    Receiver<(u64, Result<Vec<Rgb565>, DahuaError>)>,
+    Receiver<(u64, Result<(Vec<Rgb565>, Vec<u8>), DahuaError>)>,
 ) {
     let (request_tx, request_rx) = mpsc::sync_channel::<(u64, u32)>(128);
     let (result_tx, result_rx) = mpsc::channel();
@@ -292,9 +294,11 @@ fn start_alarm_snapshot_worker(
                 "SNAPSHOT",
                 format!("request started alarm={sequence} channel={channel}"),
             );
-            let result = client
-                .snapshot(channel)
-                .and_then(|bytes| decode_snapshot(&bytes).ok_or(DahuaError::Snapshot));
+            let result = client.snapshot(channel).and_then(|jpeg| {
+                decode_snapshot(&jpeg)
+                    .map(|pixels| (pixels, jpeg))
+                    .ok_or(DahuaError::Snapshot)
+            });
             if result.is_ok() {
                 log(
                     "SNAPSHOT",
@@ -352,17 +356,80 @@ fn human_detection(event: &Event) -> Option<(Vec<AlarmRectangle>, String)> {
     (!rectangles.is_empty()).then_some((rectangles, timestamp))
 }
 
-fn random_demo_rectangle() -> AlarmRectangle {
+fn intersecting_area_rectangle(
+    ui: &Ui,
+    channel: u32,
+    rectangles: &[AlarmRectangle],
+) -> Option<AlarmRectangle> {
+    if channel >= 6 {
+        return None;
+    }
+    rectangles
+        .iter()
+        .copied()
+        .find(|rect| ui.area_contains(channel as u8, *rect))
+}
+
+fn random_demo_detection(ui: &Ui, camera_count: usize) -> Option<(u8, AlarmRectangle)> {
+    let candidates: Vec<(u8, usize, usize)> = (0..camera_count.min(6))
+        .flat_map(|camera| {
+            ui.selected_area_cells(camera as u8)
+                .into_iter()
+                .map(move |(row, col)| (camera as u8, row, col))
+        })
+        .collect();
     let mut rng = rand::thread_rng();
+    let (camera, row, col) = *candidates.get(rng.gen_range(0..candidates.len()))?;
     let width = rng.gen_range(550_u16..=1150);
     let height = rng.gen_range(1500_u16..=2900);
-    let left = rng.gen_range(0..=8192 - width);
-    let top = rng.gen_range(0..=8192 - height);
-    AlarmRectangle {
+    let center_x = ((col * 2 + 1) * 8192 / (AREA_COLUMNS * 2)) as u16;
+    let center_y = ((row * 2 + 1) * 8192 / (AREA_ROWS * 2)) as u16;
+    let left = center_x.saturating_sub(width / 2).min(8192 - width);
+    let top = center_y.saturating_sub(height / 2).min(8192 - height);
+    let rectangle = AlarmRectangle {
         left,
         top,
         right: left + width,
         bottom: top + height,
+    };
+    ui.area_contains(camera, rectangle)
+        .then_some((camera, rectangle))
+}
+
+fn record_history_event(
+    history: &mut EventHistory,
+    ui: &mut Ui,
+    timestamp: &str,
+    camera: u8,
+) -> Option<u64> {
+    let camera_name = ui
+        .cameras()
+        .get(camera as usize)
+        .map(|camera| camera.name.clone())
+        .unwrap_or_else(|| format!("Camera {}", camera + 1));
+    let description = "Human".to_owned();
+    match history.record(
+        timestamp.to_owned(),
+        camera_name.clone(),
+        description.clone(),
+    ) {
+        Ok(id) => {
+            ui.add_history_entry(HistoryEntry {
+                id,
+                camera_name,
+                timestamp: timestamp.to_owned(),
+                description,
+                snapshot_file: None,
+            });
+            Some(id)
+        }
+        Err(error) => {
+            log(
+                "HISTORY ERROR",
+                format!("event could not be saved: {error}"),
+            );
+            None
+        }
     }
 }
 
@@ -470,9 +537,33 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut pager = Pager::default();
     let mut ui = Ui::default();
     let mut device = Device::default();
+    let mut shell = Framebuffer::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+    let initial_time = chrono::Local::now().format("%H:%M").to_string();
+    ui.render(
+        &mut frame,
+        &pager,
+        ConnectionStatus::Connecting,
+        &initial_time,
+    )?;
+    device.render(&mut shell, &frame, &ui);
+    window.update_with_buffer(&shell.pixels, WINDOW_WIDTH, WINDOW_HEIGHT)?;
+    log(
+        "UI",
+        "initial LCD frame presented before NVR initialization",
+    );
+    let mut history_store = match EventHistory::load(config_path) {
+        Ok(history) => history,
+        Err(error) => {
+            log(
+                "HISTORY ERROR",
+                format!("could not load local history: {error}"),
+            );
+            EventHistory::empty(config_path)
+        }
+    };
+    ui.set_history(history_store.ui_entries());
     let mut lcd_down = false;
     let mut left_was_down = false;
-    let mut shell = Framebuffer::new(WINDOW_WIDTH, WINDOW_HEIGHT);
     let mut audio = match Audio::new() {
         Ok(audio) => {
             log("AUDIO", "native output ready");
@@ -502,6 +593,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         .map(|(tx, rx)| (Some(tx), Some(rx)))
         .unwrap_or((None, None));
     let mut seen_event_ids = std::collections::VecDeque::<(u32, u64)>::new();
+    let mut snapshot_history_ids = std::collections::HashMap::<u64, u64>::new();
+    let mut history_snapshot_attempt = None;
+    let mut history_snapshot_receiver: Option<(u64, Receiver<Result<Vec<Rgb565>, String>>)> = None;
     let mut previous_connection_status = initial_status;
     let mut previous_dropped_messages = 0;
     let mut previous_sounding = pager.sounding();
@@ -587,9 +681,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     }
                 }
                 let object_count = rectangles.len();
-                let Some(rect) = rectangles
-                    .into_iter()
-                    .find(|rect| ui.area_contains(event.channel as u8, *rect))
+                let Some(rect) = intersecting_area_rectangle(&ui, event.channel, &rectangles)
                 else {
                     log(
                         "DETECTION",
@@ -621,9 +713,18 @@ fn main() -> Result<(), Box<dyn Error>> {
                             format!("screen {previous_screen:?} -> {:?} (new alarm)", ui.screen),
                         );
                     }
-                    ui.set_alarm_timestamp(sequence, timestamp);
+                    ui.set_alarm_timestamp(sequence, timestamp.clone());
+                    if let Some(history_id) = record_history_event(
+                        &mut history_store,
+                        &mut ui,
+                        &timestamp,
+                        event.channel as u8,
+                    ) {
+                        snapshot_history_ids.insert(sequence, history_id);
+                    }
                     if let Some(sender) = &alarm_snapshot_tx {
                         if sender.try_send((sequence, event.channel + 1)).is_err() {
+                            snapshot_history_ids.remove(&sequence);
                             log(
                                 "SNAPSHOT ERROR",
                                 format!("queue full; snapshot unavailable for alarm={sequence}"),
@@ -636,6 +737,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                             );
                         }
                     } else {
+                        snapshot_history_ids.remove(&sequence);
                         log(
                             "SNAPSHOT",
                             format!("no NVR client; alarm={sequence} has no snapshot"),
@@ -659,52 +761,60 @@ fn main() -> Result<(), Box<dyn Error>> {
         };
         if demo_mode && !demo_alarm_fired && Instant::now() >= demo_alarm_deadline {
             demo_alarm_fired = true;
-            let mut rng = rand::thread_rng();
-            let camera = rng.gen_range(0..demo_camera_count) as u8;
-            let rectangle = random_demo_rectangle();
-            let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
-            log(
-                "DEMO",
-                format!(
-                    "firing one synthetic human alarm after 15 seconds: channel={camera}, rect=[{},{},{},{}]",
-                    rectangle.left, rectangle.top, rectangle.right, rectangle.bottom
-                ),
-            );
-            if let Some(sequence) = pager.detect_with_rectangle(camera, now, Some(rectangle)) {
-                let previous_screen = ui.screen;
-                ui.sync_alarms(&pager);
-                if previous_screen != ui.screen {
-                    log(
-                        "UI",
-                        format!("screen {previous_screen:?} -> {:?} (demo alarm)", ui.screen),
-                    );
-                }
-                ui.set_alarm_timestamp(sequence, timestamp);
-                if let Some(sender) = &alarm_snapshot_tx {
-                    if sender.try_send((sequence, camera as u32 + 1)).is_ok() {
-                        log(
-                            "SNAPSHOT",
-                            format!("queued demo alarm={sequence} channel={}", camera + 1),
-                        );
-                    } else {
-                        log("SNAPSHOT ERROR", "demo snapshot queue is full");
-                        ui.set_alarm_snapshot(sequence, None);
-                    }
-                } else {
-                    log("SNAPSHOT ERROR", "demo snapshot unavailable: no NVR client");
-                    ui.set_alarm_snapshot(sequence, None);
-                }
+            if let Some((camera, rectangle)) = random_demo_detection(&ui, demo_camera_count) {
+                let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
                 log(
-                    "ALARM",
+                    "DEMO",
                     format!(
-                        "demo alarm created sequence={sequence} channel={camera} mode={:?}",
-                        pager.mode
+                        "firing one synthetic human alarm inside saved area: channel={camera}, rect=[{},{},{},{}]",
+                        rectangle.left, rectangle.top, rectangle.right, rectangle.bottom
                     ),
                 );
+                if let Some(sequence) = pager.detect_with_rectangle(camera, now, Some(rectangle)) {
+                    let previous_screen = ui.screen;
+                    ui.sync_alarms(&pager);
+                    if previous_screen != ui.screen {
+                        log(
+                            "UI",
+                            format!("screen {previous_screen:?} -> {:?} (demo alarm)", ui.screen),
+                        );
+                    }
+                    let _ = record_history_event(&mut history_store, &mut ui, &timestamp, camera)
+                        .map(|history_id| snapshot_history_ids.insert(sequence, history_id));
+                    ui.set_alarm_timestamp(sequence, timestamp);
+                    if let Some(sender) = &alarm_snapshot_tx {
+                        if sender.try_send((sequence, camera as u32 + 1)).is_ok() {
+                            log(
+                                "SNAPSHOT",
+                                format!("queued demo alarm={sequence} channel={}", camera + 1),
+                            );
+                        } else {
+                            snapshot_history_ids.remove(&sequence);
+                            log("SNAPSHOT ERROR", "demo snapshot queue is full");
+                            ui.set_alarm_snapshot(sequence, None);
+                        }
+                    } else {
+                        snapshot_history_ids.remove(&sequence);
+                        log("SNAPSHOT ERROR", "demo snapshot unavailable: no NVR client");
+                        ui.set_alarm_snapshot(sequence, None);
+                    }
+                    log(
+                        "ALARM",
+                        format!(
+                            "demo alarm created sequence={sequence} channel={camera} mode={:?}",
+                            pager.mode
+                        ),
+                    );
+                } else {
+                    log(
+                        "DEMO",
+                        format!("synthetic alarm was rejected in mode {:?}", pager.mode),
+                    );
+                }
             } else {
                 log(
                     "DEMO",
-                    format!("synthetic alarm was rejected in mode {:?}", pager.mode),
+                    "no alarm: configure at least one selected area in Area Settings",
                 );
             }
         }
@@ -746,8 +856,23 @@ fn main() -> Result<(), Box<dyn Error>> {
         if let Some(receiver) = &alarm_snapshot_rx {
             while let Ok((sequence, result)) = receiver.try_recv() {
                 match result {
-                    Ok(image) => ui.set_alarm_snapshot(sequence, Some(image)),
+                    Ok((image, jpeg)) => {
+                        if let Some(history_id) = snapshot_history_ids.remove(&sequence) {
+                            match history_store.record_snapshot(history_id, &jpeg) {
+                                Ok(file_name) => {
+                                    log("HISTORY", "snapshot attached to saved event");
+                                    ui.set_history_snapshot(history_id, file_name, image.clone());
+                                }
+                                Err(error) => log(
+                                    "HISTORY ERROR",
+                                    format!("snapshot could not be saved: {error}"),
+                                ),
+                            }
+                        }
+                        ui.set_alarm_snapshot(sequence, Some(image));
+                    }
                     Err(error) => {
+                        snapshot_history_ids.remove(&sequence);
                         log(
                             "SNAPSHOT ERROR",
                             format!("alarm={sequence} result failed: {error}"),
@@ -755,6 +880,60 @@ fn main() -> Result<(), Box<dyn Error>> {
                         ui.set_alarm_snapshot(sequence, None);
                     }
                 }
+            }
+        }
+        if let Some((history_id, receiver)) = history_snapshot_receiver.as_ref() {
+            match receiver.try_recv() {
+                Ok(Ok(image)) => {
+                    let file_name = ui
+                        .selected_history_entry()
+                        .filter(|entry| entry.id == *history_id)
+                        .and_then(|entry| entry.snapshot_file.clone());
+                    if let Some(file_name) = file_name {
+                        ui.set_history_snapshot(*history_id, file_name, image);
+                    }
+                    history_snapshot_receiver = None;
+                }
+                Ok(Err(error)) => {
+                    ui.set_history_snapshot_failed(*history_id);
+                    log("HISTORY", format!("saved snapshot unavailable: {error}"));
+                    history_snapshot_receiver = None;
+                }
+                Err(TryRecvError::Disconnected) => {
+                    ui.set_history_snapshot_failed(*history_id);
+                    history_snapshot_receiver = None;
+                }
+                Err(TryRecvError::Empty) => {}
+            }
+        }
+        if let Some((history_id, snapshot_file)) = ui
+            .selected_history_entry()
+            .map(|entry| (entry.id, entry.snapshot_file.clone()))
+            && history_snapshot_attempt != Some(history_id)
+        {
+            history_snapshot_attempt = Some(history_id);
+            if let Some(snapshot_file) = snapshot_file {
+                match history_store.snapshot_path(&snapshot_file) {
+                    Ok(path) => {
+                        ui.set_history_snapshot_loading(history_id);
+                        let (sender, receiver) = mpsc::channel();
+                        std::thread::spawn(move || {
+                            let image = std::fs::read(path)
+                                .map_err(|error| error.to_string())
+                                .and_then(|jpeg| {
+                                    decode_snapshot(&jpeg).ok_or_else(|| "invalid JPEG".to_owned())
+                                });
+                            let _ = sender.send(image);
+                        });
+                        history_snapshot_receiver = Some((history_id, receiver));
+                    }
+                    Err(error) => {
+                        ui.set_history_snapshot_failed(history_id);
+                        log("HISTORY", format!("saved snapshot unavailable: {error}"));
+                    }
+                }
+            } else {
+                ui.set_history_snapshot_failed(history_id);
             }
         }
         finish_camera_refresh(&mut camera_refresh, &mut ui);
@@ -1017,11 +1196,47 @@ mod status_tests {
 
     #[test]
     fn demo_person_rectangle_stays_inside_nvr_coordinate_plane() {
+        let mut ui = Ui::default();
+        let mut cameras: Vec<_> = (1..=6)
+            .map(|index| AreaCamera::new(index, format!("Camera {index}")))
+            .collect();
+        cameras[0].mask[0][0] = true;
+        cameras[0].mask[5][12] = true;
+        ui.set_cameras(cameras);
         for _ in 0..100 {
-            let rect = random_demo_rectangle();
+            let (camera, rect) = random_demo_detection(&ui, 6).unwrap();
             assert!(rect.left < rect.right && rect.top < rect.bottom);
             assert!(rect.right <= 8192 && rect.bottom <= 8192);
+            assert!(ui.area_contains(camera, rect));
         }
+    }
+
+    #[test]
+    fn event_rectangle_must_intersect_the_saved_camera_mask() {
+        let mut ui = Ui::default();
+        let mut cameras: Vec<_> = (1..=6)
+            .map(|index| AreaCamera::new(index, format!("Camera {index}")))
+            .collect();
+        cameras[1].mask[3][4] = true;
+        ui.set_cameras(cameras);
+        let outside = AlarmRectangle {
+            left: 0,
+            top: 0,
+            right: 100,
+            bottom: 100,
+        };
+        let inside = AlarmRectangle {
+            left: 900,
+            top: 1100,
+            right: 1100,
+            bottom: 1400,
+        };
+        assert_eq!(intersecting_area_rectangle(&ui, 1, &[outside]), None);
+        assert_eq!(
+            intersecting_area_rectangle(&ui, 1, &[outside, inside]),
+            Some(inside)
+        );
+        assert_eq!(intersecting_area_rectangle(&ui, 6, &[inside]), None);
     }
 
     #[test]
