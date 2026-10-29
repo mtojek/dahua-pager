@@ -27,6 +27,11 @@ const CAMERA_ROW_HEIGHT: u32 = 36;
 const CAMERA_VISIBLE_ROWS: usize = 7;
 const RECENT_CAMERA_X: i32 = 200;
 const RECENT_CAMERA_MAX_CHARS: usize = 23;
+const HEADER_HEIGHT: i32 = 24;
+
+fn header_text_baseline(font: &embedded_graphics::mono_font::MonoFont<'_>) -> i32 {
+    (HEADER_HEIGHT - font.character_size.height as i32) / 2 + font.baseline as i32
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Screen {
@@ -283,6 +288,7 @@ impl Ui {
                 Mode::Disarmed => Mode::Armed,
             }),
             Action::History => {
+                self.history_selected = self.history.len().saturating_sub(1);
                 self.screen = Screen::History;
                 self.focus = None;
             }
@@ -322,6 +328,10 @@ impl Ui {
             Action::PreviousCamera | Action::NextCamera => {}
             Action::SaveAreas => {}
             Action::Back => {
+                if self.screen == Screen::History {
+                    self.history_image = None;
+                    self.history_loading = None;
+                }
                 self.screen = match self.screen {
                     Screen::Alarm => self.return_screen,
                     Screen::AreaEditor => Screen::AreaCameras,
@@ -387,6 +397,13 @@ impl Ui {
             self.history_loading = None;
             self.history_image = Some((id, image));
         }
+    }
+
+    pub fn set_history_snapshot_file(&mut self, id: u64, file_name: String) {
+        if let Some(entry) = self.history.iter_mut().find(|entry| entry.id == id) {
+            entry.snapshot_file = Some(file_name);
+        }
+        self.history_pending.remove(&id);
     }
 
     pub fn set_history_snapshot_loading(&mut self, id: u64) {
@@ -678,21 +695,21 @@ impl Ui {
         };
         Text::new(
             mode,
-            Point::new(12, 18),
+            Point::new(12, header_text_baseline(&FONT_9X18_BOLD)),
             MonoTextStyle::new(&FONT_9X18_BOLD, Rgb565::WHITE),
         )
         .draw(display)?;
         text(
             display,
             time,
-            Point::new(468, 18),
+            Point::new(468, header_text_baseline(&FONT_9X18)),
             Alignment::Right,
             Rgb565::WHITE,
         )?;
         if self.screen == Screen::Standby {
             Text::with_alignment(
                 connection.label(),
-                Point::new(240, 16),
+                Point::new(240, header_text_baseline(&FONT_6X10)),
                 MonoTextStyle::new(&FONT_6X10, Rgb565::WHITE),
                 Alignment::Center,
             )
@@ -723,7 +740,7 @@ impl Ui {
             };
             Text::with_alignment(
                 &title,
-                Point::new(240, 16),
+                Point::new(240, header_text_baseline(&FONT_6X10)),
                 MonoTextStyle::new(&FONT_6X10, Rgb565::WHITE),
                 Alignment::Center,
             )

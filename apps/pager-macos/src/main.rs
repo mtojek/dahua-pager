@@ -14,7 +14,11 @@ use rand::Rng;
 use std::{
     error::Error,
     path::Path,
-    sync::mpsc::{self, Receiver, SyncSender, TryRecvError},
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+        mpsc::{self, Receiver, SyncSender, TryRecvError},
+    },
     time::{Duration, Instant},
 };
 
@@ -44,6 +48,21 @@ fn log(level: &str, message: impl std::fmt::Display) {
         "[{}] {level} {message}",
         chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f")
     );
+}
+
+struct FileIoActivity(Arc<AtomicUsize>);
+
+impl FileIoActivity {
+    fn begin(active: Arc<AtomicUsize>) -> Self {
+        active.fetch_add(1, Ordering::Relaxed);
+        Self(active)
+    }
+}
+
+impl Drop for FileIoActivity {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Relaxed);
+    }
 }
 
 fn apply_ui_action(ui: &mut Ui, pager: &mut Pager, action: Action) {
@@ -101,7 +120,7 @@ fn preview(path: &str) -> Result<(), Box<dyn Error>> {
         "22:15",
     )?;
     let mut shell = Framebuffer::new(WINDOW_WIDTH, WINDOW_HEIGHT);
-    Device::default().render(&mut shell, &frame, &Ui::default());
+    Device::default().render(&mut shell, &frame, &Ui::default(), Mode::Armed, false);
     shell.save_ppm(path)?;
     Ok(())
 }
@@ -556,7 +575,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         ConnectionStatus::Connecting,
         &initial_time,
     )?;
-    device.render(&mut shell, &frame, &ui);
+    device.render(&mut shell, &frame, &ui, pager.mode, false);
     window.update_with_buffer(&shell.pixels, WINDOW_WIDTH, WINDOW_HEIGHT)?;
     log(
         "UI",
@@ -572,6 +591,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             EventHistory::empty(config_path)
         }
     };
+    let file_io_active = Arc::new(AtomicUsize::new(0));
     ui.set_history(history_store.ui_entries());
     let mut lcd_down = false;
     let mut left_was_down = false;
@@ -725,12 +745,16 @@ fn main() -> Result<(), Box<dyn Error>> {
                         );
                     }
                     ui.set_alarm_timestamp(sequence, timestamp.clone());
-                    if let Some(history_id) = record_history_event(
-                        &mut history_store,
-                        &mut ui,
-                        &timestamp,
-                        event.channel as u8,
-                    ) {
+                    let history_id = {
+                        let _activity = FileIoActivity::begin(file_io_active.clone());
+                        record_history_event(
+                            &mut history_store,
+                            &mut ui,
+                            &timestamp,
+                            event.channel as u8,
+                        )
+                    };
+                    if let Some(history_id) = history_id {
                         snapshot_history_ids.insert(sequence, history_id);
                     }
                     if let Some(sender) = &alarm_snapshot_tx {
@@ -790,7 +814,11 @@ fn main() -> Result<(), Box<dyn Error>> {
                             format!("screen {previous_screen:?} -> {:?} (demo alarm)", ui.screen),
                         );
                     }
-                    let _ = record_history_event(&mut history_store, &mut ui, &timestamp, camera)
+                    let history_id = {
+                        let _activity = FileIoActivity::begin(file_io_active.clone());
+                        record_history_event(&mut history_store, &mut ui, &timestamp, camera)
+                    };
+                    let _ = history_id
                         .map(|history_id| snapshot_history_ids.insert(sequence, history_id));
                     ui.set_alarm_timestamp(sequence, timestamp);
                     if let Some(sender) = &alarm_snapshot_tx {
@@ -869,10 +897,11 @@ fn main() -> Result<(), Box<dyn Error>> {
                 match result {
                     Ok((image, jpeg)) => {
                         if let Some(history_id) = snapshot_history_ids.remove(&sequence) {
+                            let _activity = FileIoActivity::begin(file_io_active.clone());
                             match history_store.record_snapshot(history_id, &jpeg) {
                                 Ok(file_name) => {
                                     log("HISTORY", "snapshot attached to saved event");
-                                    ui.set_history_snapshot(history_id, file_name, image.clone());
+                                    ui.set_history_snapshot_file(history_id, file_name);
                                 }
                                 Err(error) => {
                                     ui.set_history_snapshot_failed(history_id);
@@ -899,11 +928,15 @@ fn main() -> Result<(), Box<dyn Error>> {
         if let Some((history_id, receiver)) = history_snapshot_receiver.as_ref() {
             match receiver.try_recv() {
                 Ok(Ok(image)) => {
-                    let file_name = ui
-                        .selected_history_entry()
-                        .filter(|entry| entry.id == *history_id)
-                        .and_then(|entry| entry.snapshot_file.clone());
-                    if let Some(file_name) = file_name {
+                    if ui.screen == pager_ui::Screen::History
+                        && ui
+                            .selected_history_entry()
+                            .is_some_and(|entry| entry.id == *history_id)
+                    {
+                        let file_name = ui
+                            .selected_history_entry()
+                            .and_then(|entry| entry.snapshot_file.clone())
+                            .unwrap_or_default();
                         ui.set_history_snapshot(*history_id, file_name, image);
                     }
                     history_snapshot_receiver = None;
@@ -920,9 +953,13 @@ fn main() -> Result<(), Box<dyn Error>> {
                 Err(TryRecvError::Empty) => {}
             }
         }
-        if let Some((history_id, snapshot_file)) = ui
-            .selected_history_entry()
-            .map(|entry| (entry.id, entry.snapshot_file.clone()))
+        if ui.screen != pager_ui::Screen::History {
+            history_snapshot_attempt = None;
+        }
+        if ui.screen == pager_ui::Screen::History
+            && let Some((history_id, snapshot_file)) = ui
+                .selected_history_entry()
+                .map(|entry| (entry.id, entry.snapshot_file.clone()))
             && history_snapshot_attempt != Some(history_id)
         {
             history_snapshot_attempt = Some(history_id);
@@ -931,7 +968,9 @@ fn main() -> Result<(), Box<dyn Error>> {
                     Ok(path) => {
                         ui.set_history_snapshot_loading(history_id);
                         let (sender, receiver) = mpsc::channel();
+                        let file_io_active = file_io_active.clone();
                         std::thread::spawn(move || {
+                            let _activity = FileIoActivity::begin(file_io_active);
                             let image = std::fs::read(path)
                                 .map_err(|error| error.to_string())
                                 .and_then(|jpeg| {
@@ -1017,6 +1056,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                                 begin_selected_snapshot(camera_client.as_ref(), &mut ui);
                         }
                         if action == Action::SaveAreas {
+                            let _activity = FileIoActivity::begin(file_io_active.clone());
                             if save_area_masks(config_path, &ui).is_ok() {
                                 log("AREAS", "all camera masks saved to local configuration");
                                 ui.save_completed();
@@ -1053,6 +1093,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 snapshot_receiver = begin_selected_snapshot(camera_client.as_ref(), &mut ui);
             }
             if action == Action::SaveAreas {
+                let _activity = FileIoActivity::begin(file_io_active.clone());
                 if save_area_masks(config_path, &ui).is_ok() {
                     log("AREAS", "all camera masks saved to local configuration");
                     ui.save_completed();
@@ -1131,7 +1172,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
         let time = chrono::Local::now().format("%H:%M").to_string();
         ui.render(&mut frame, &pager, status, &time)?;
-        device.render(&mut shell, &frame, &ui);
+        let green_led_on =
+            file_io_active.load(Ordering::Relaxed) > 0 && clock.elapsed().as_millis() % 300 < 150;
+        device.render(&mut shell, &frame, &ui, pager.mode, green_led_on);
         window.update_with_buffer(&shell.pixels, WINDOW_WIDTH, WINDOW_HEIGHT)?;
     }
     log("APP", "window closed; shutdown complete");

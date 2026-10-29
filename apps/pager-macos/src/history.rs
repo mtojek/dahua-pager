@@ -99,10 +99,17 @@ impl EventHistory {
         id: u64,
         jpeg: &[u8],
     ) -> Result<String, Box<dyn std::error::Error>> {
-        let file_name = format!("event-{id}.jpg");
         fs::create_dir_all(&self.snapshot_dir)?;
-        let target = self.snapshot_dir.join(&file_name);
-        let temporary = self.snapshot_dir.join(format!("event-{id}.jpg.tmp"));
+        let mut timestamp = chrono::Utc::now().timestamp_millis();
+        let (file_name, target, temporary) = loop {
+            let file_name = format!("{timestamp}.jpg");
+            let target = self.snapshot_dir.join(&file_name);
+            let temporary = self.snapshot_dir.join(format!("{file_name}.tmp"));
+            if !target.exists() && !temporary.exists() {
+                break (file_name, target, temporary);
+            }
+            timestamp += 1;
+        };
         fs::write(&temporary, jpeg)?;
         fs::rename(temporary, target)?;
         let entry = self

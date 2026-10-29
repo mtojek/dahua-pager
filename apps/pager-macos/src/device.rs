@@ -7,6 +7,7 @@ use embedded_graphics::{
     primitives::{Circle, PrimitiveStyle, Rectangle},
     text::{Alignment, Text},
 };
+use pager_core::Mode;
 use pager_ui::{Action, HEIGHT, Screen, Ui, WIDTH};
 
 pub const WINDOW_WIDTH: usize = 624;
@@ -19,6 +20,7 @@ const CENTERS: [Point; 4] = [
     Point::new(560, 124),
     Point::new(560, 220),
 ];
+const LED_CENTERS: [Point; 2] = [Point::new(518, 114), Point::new(518, 134)];
 const COLORS: [Rgb565; 4] = [
     Rgb565::new(6, 48, 10),
     Rgb565::new(30, 51, 3),
@@ -59,7 +61,14 @@ impl Device {
         self.down = down;
         action
     }
-    pub fn render(&self, frame: &mut Framebuffer, lcd: &Framebuffer, ui: &Ui) {
+    pub fn render(
+        &self,
+        frame: &mut Framebuffer,
+        lcd: &Framebuffer,
+        ui: &Ui,
+        mode: Mode,
+        green_led_on: bool,
+    ) {
         frame.clear(Rgb565::new(3, 6, 7)).unwrap();
         Rectangle::new(
             LCD_ORIGIN - Point::new(3, 3),
@@ -72,6 +81,27 @@ impl Device {
             let start = (y + LCD_ORIGIN.y as usize) * WINDOW_WIDTH + LCD_ORIGIN.x as usize;
             frame.pixels[start..start + WIDTH as usize]
                 .copy_from_slice(&lcd.pixels[y * WIDTH as usize..(y + 1) * WIDTH as usize]);
+        }
+        let led_colors = [
+            if mode == Mode::Armed {
+                Rgb565::new(31, 0, 0)
+            } else {
+                Rgb565::new(6, 0, 0)
+            },
+            if green_led_on {
+                Rgb565::new(0, 63, 0)
+            } else {
+                Rgb565::new(0, 5, 0)
+            },
+        ];
+        for (center, color) in LED_CENTERS.into_iter().zip(led_colors) {
+            let led = Circle::new(center - Point::new(5, 5), 10);
+            led.into_styled(PrimitiveStyle::with_fill(color))
+                .draw(frame)
+                .unwrap();
+            led.into_styled(PrimitiveStyle::with_stroke(Rgb565::new(14, 18, 18), 1))
+                .draw(frame)
+                .unwrap();
         }
         for (i, action) in ui.physical_actions().iter().enumerate() {
             let pressed = action.is_some_and(|a| self.pressed == Some((ui.screen, a)));

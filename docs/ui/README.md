@@ -1,7 +1,9 @@
 # LCD views
 
 The Mac app renders the same 480 × 320 LCD layout planned for the ILI9488 on
-the ESP32-S3. Its case and physical buttons are drawn outside the LCD.
+the ESP32-S3. Its case and physical controls are drawn outside the LCD. The
+case shows two LEDs between the red button and LCD: red for ARMED, green
+blinking during local file reads and writes.
 
 ## Standby
 

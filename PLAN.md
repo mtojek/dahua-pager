@@ -19,6 +19,9 @@ from the [crd-esp32 project](https://github.com/mtojek/crd-esp32).
 - Local event history with JPEG snapshots, browsing controls and a four-event
   text list on Standby. History keeps up to 1,000 records.
 - macOS device preview with the 480 × 320 LCD and physical controls.
+- The Mac device preview shows two status LEDs between the red button and LCD:
+  red is on while ARMED; green blinks while local file reads and writes. The
+  ESP32 port will connect these indicators to the actual LEDs and SD activity.
 
 Run the Mac app with `cargo run -p pager-macos`. It reads private
 `config.local.json`; see [README.md](README.md).
@@ -32,8 +35,8 @@ Run the Mac app with `cargo run -p pager-macos`. It reads private
    device. Use a configurable artificial storage budget on macOS for
    development. Prune oldest complete records and snapshots first.
 3. **ESP32-S3 port:** connect the shared renderer and alarm logic to the actual
-   display, buttons, Wi-Fi, SD card and audio hardware. Measure memory and JPEG
-   decode time on the target device.
+   display, buttons, status LEDs, Wi-Fi, SD card and audio hardware. Measure
+   memory and JPEG decode time on the target device.
 4. **End-to-end validation:** check reconnects, alarms, snapshots, audio and
    storage failure behavior on the Mac and then on the handheld.
 
@@ -46,4 +49,6 @@ Run the Mac app with `cargo run -p pager-macos`. It reads private
   It does not change the mode or clear history.
 - Alarm and History snapshots come from the NVR after detection; they may show
   a later frame. The original NVR image caption is preserved.
+- The red status LED stays on in ARMED and is off in MUTED and DISARMED. The
+  green status LED blinks during file reads and writes.
 - Keep local NVR credentials, camera names and captures out of Git and logs.
