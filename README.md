@@ -1,67 +1,44 @@
 # Dahua Pager
 
-Alarm pager for Dahua NVRs, written in Rust. macOS first, ESP32-S3 later.
-
-The NVR client supports Digest authentication, camera discovery, snapshots and
-reconnecting event streams. The desktop UI shows live connection status and
-opens an alarm view for accepted human-detection events. macOS route changes
-cancel stale connections; 15 seconds without valid messages triggers reconnect.
+macOS pager for Dahua NVR alarms. Development starts on the Mac; an ESP32-S3
+port is planned.
 
 ## Run
+
+The app reads `config.local.json` from the project directory. Create it from
+`config.example.json` and fill in the NVR address and credentials. Set
+`tls_insecure` to `true` only when the NVR needs the equivalent of `curl -k`.
 
 ```sh
 cargo run -p pager-macos
 ```
 
-Runtime diagnostics are printed to the terminal with timestamps. They include
-NVR connection changes, event handling, alarm and snapshot activity, and UI
-actions; credentials, host addresses and camera names are omitted.
+Keep `config.local.json` private; it is ignored by Git.
 
-Click the physical buttons, or use **Tab/arrows + Enter**. Red/**S** sleeps the
-LCD; blue/**M** cycles ARMED → MUTED → DISARMED. Any button/key wakes the LCD
-without also acting. **H** opens History, **T** opens Settings, **Backspace**
-returns, **Esc** exits when awake.
+## What it does
 
-## Connect to an NVR
+- Connects to the NVR event stream and reconnects after network loss.
+- Opens **Area Settings** to refresh the camera list and edit each camera's
+  32 × 20 detection mask. Saving writes the masks to the local config.
+- Accepts `SmartMotionHuman` Start events only when the detected rectangle
+  intersects that camera's saved mask. Motion events without a person rectangle
+  do not trigger alarms.
+- Shows the NVR snapshot and detected rectangle on the Alarm screen. The still
+  is requested after detection and may not be from the exact detection instant.
+- Records accepted alarms and JPEG snapshots in local History. The main screen
+  shows the four latest events; History lets you browse snapshots.
 
-Copy `config.example.json` to `config.local.json` and fill in the address and
-credentials. Set `tls_insecure: true` for self-signed certificates (`curl -k`).
-Camera IDs come from the NVR's unique `Name` values. Area Settings saves each ID
-beside its mask in `config.local.json`; IP addresses and channel indexes stay
-out of the config.
+History metadata is stored in `config.local.history.json`; JPEG files are in
+`config.local.history/`. The newest 1,000 records are retained. Both paths are
+ignored by Git.
 
-To exercise the alarm screen, set the top-level `demo_mode` field in
-`config.local.json` to `true`. After 15 seconds the app chooses a random channel
-and draws a random person rectangle over that channel's live NVR snapshot. The
-demo event is synthetic; the image is fetched from the real NVR. Live human
-events are suppressed while demo mode is on. Set it back to `false` for normal
-operation.
+## Controls
 
-```sh
-# Watch events; reconnect automatically
-cargo run -p pager-dahua --example probe -- config.local.json monitor
+On the desktop, click the physical buttons around the LCD or use Tab/arrows and
+Enter. **H** opens History, **T** opens Settings, Backspace goes back, and Esc
+closes the app. The red button sleeps the display; an alarm wakes it. The blue
+button cycles ARMED, MUTED and DISARMED.
 
-# Check snapshot retrieval
-cargo run -p pager-dahua --example probe -- config.local.json snapshot
-```
-
-Keep real credentials and camera names out of Git. `config.local.json` and
-`captures/` are ignored.
-
-## Tests
-
-```sh
-cargo test --workspace --all-targets --locked
-cargo clippy --workspace --all-targets --locked -- -D warnings
-cargo fmt --all -- --check
-```
-
-CI runs these checks on macOS for pushes to `main`. Tests against a real NVR
-require local configuration and must be run explicitly:
-
-```sh
-cargo test -p pager-dahua --test live_nvr -- --ignored --nocapture --test-threads=1
-```
-
-See [PLAN.md](PLAN.md) for the implementation plan and [docs/ui](docs/ui/README.md)
-for screen layouts and navigation.
+For the synthetic alarm flow, set `demo_mode` to `true` in the local config. It
+fires once after 15 seconds, uses a selected area mask and fetches its snapshot
+from the configured NVR. Live human events are suppressed while demo mode is on.
