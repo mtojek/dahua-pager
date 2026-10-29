@@ -38,7 +38,12 @@ full content below remains planned. Mouse clicks activate on release, and draggi
 off a circular physical button cancels it. Keyboard focus follows Tab/arrows; Enter activates it. Clicks inside the standby LCD do not activate the case controls.
 
 The normal app reads local config and shows the reconnecting NVR subscription's
-status. Received detection messages do not yet trigger GUI alarms. Missing or
+status. macOS checks the local route to the NVR every 250 ms, independently of
+TCP. A route loss invalidates ONLINE and cancels the stream; restoring a route
+starts a fresh connection, which becomes ONLINE only after a valid message.
+A separate 15-second deadline without a complete valid message also reconnects,
+even if partial bytes arrive or the configured TCP timeout is longer.
+Received detection messages do not yet trigger GUI alarms. Missing or
 invalid config leaves the controls usable and shows a configuration status.
 
 ## History

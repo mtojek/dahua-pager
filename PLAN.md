@@ -179,7 +179,7 @@ Work proceeds on macOS first; ESP32 discovery and porting do not block the deskt
 
 ## 13. Open questions / validation gates
 
-- **Native audio and reconnect implemented:** macOS audio is generated in-process through rodio/CPAL/CoreAudio. The communication library exposes a background subscription and a monitor command with bounded exponential retry (1–30 seconds), idle-read timeout, cancellation and visible mailbox overflow. Tests cover service errors, dropped and blackholed connections, recovery, healthy long-lived streams and stopping retries. The GUI remains a synthetic prototype pending integration of real detection/zone processing.
+- **Native audio and reconnect implemented:** macOS audio is generated in-process through rodio/CPAL/CoreAudio. The communication library exposes a background subscription and a monitor command with bounded exponential retry (1–30 seconds), a 15-second complete-message watchdog, cancellable asynchronous reads and visible mailbox overflow. The macOS route monitor invalidates stale ONLINE on local network changes, including a brief down/up before the TCP timeout. Tests cover service errors, dropped and blackholed connections, recovery, healthy long-lived streams and stopping retries. Standby displays live connection status; integration of real detection/zone processing remains pending.
 
 
 - **Channel titles verified (2026-10-28):** the read-only ChannelTitle API returned eight channel slots. All six configured camera names match the NVR ignoring ASCII case. Names were compared locally without printing them; camera names are now discovered rather than persisted in the connection config. Extra slots are not treated as proof of connected cameras.

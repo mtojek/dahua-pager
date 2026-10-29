@@ -122,3 +122,35 @@ fn live_camera_names() {
         cameras.len()
     );
 }
+
+#[test]
+#[ignore = "requires explicit authorization and a private local NVR configuration"]
+fn live_cancellable_subscription() {
+    let config = local_config();
+    let subscription = DahuaClient::new(config.nvr)
+        .expect("Unable to initialize NVR client")
+        .subscribe()
+        .expect("Unable to start subscription");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(25);
+    let mut heartbeats = 0;
+    while heartbeats < 3 {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        assert!(
+            !remaining.is_zero(),
+            "No three heartbeats within live observation window"
+        );
+        match subscription
+            .messages
+            .recv_timeout(remaining)
+            .expect("Live subscription did not deliver fresh traffic")
+        {
+            Message::Heartbeat => heartbeats += 1,
+            Message::Event(_) => {}
+        }
+    }
+    subscription.stop();
+    assert_eq!(subscription.state(), pager_dahua::ConnectionState::Stopped);
+    println!(
+        "Cancellable HTTPS/Digest subscription OK: three heartbeats received; private data withheld"
+    );
+}

@@ -10,6 +10,9 @@ use framebuffer::Framebuffer;
 mod device;
 use device::{Device, WINDOW_HEIGHT, WINDOW_WIDTH};
 
+mod network;
+use network::NetworkPath;
+
 mod audio;
 use audio::Audio;
 
@@ -27,28 +30,35 @@ fn preview(path: &str) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn connect(path: &str) -> (Option<Subscription>, ConnectionStatus) {
+fn connect(path: &str) -> (Option<Subscription>, ConnectionStatus, Option<NetworkPath>) {
     if !Path::new(path).exists() {
-        return (None, ConnectionStatus::NoConfig);
+        return (None, ConnectionStatus::NoConfig, None);
     }
     let subscription = Config::load(path)
         .and_then(|config| DahuaClient::new(config.nvr))
-        .and_then(DahuaClient::subscribe);
+        .and_then(|client| {
+            let monitor = NetworkPath::new(client.network_host());
+            client
+                .subscribe()
+                .map(|subscription| (subscription, monitor))
+        });
     match subscription {
-        Ok(subscription) => (Some(subscription), ConnectionStatus::Connecting),
-        Err(_) => (None, ConnectionStatus::ConfigError),
+        Ok((subscription, monitor)) => (Some(subscription), ConnectionStatus::Connecting, monitor),
+        Err(_) => (None, ConnectionStatus::ConfigError, None),
     }
 }
 
 fn connection_status(subscription: &Subscription) -> ConnectionStatus {
-    if subscription.dropped_messages() > 0 {
-        return ConnectionStatus::Overflow;
-    }
-    match subscription.state() {
+    status_from_state(subscription.state(), subscription.dropped_messages())
+}
+
+fn status_from_state(state: ConnectionState, dropped_messages: u64) -> ConnectionStatus {
+    match state {
         ConnectionState::Connecting => ConnectionStatus::Connecting,
+        ConnectionState::Connected if dropped_messages > 0 => ConnectionStatus::Overflow,
         ConnectionState::Connected => ConnectionStatus::Online,
         ConnectionState::Reconnecting { .. } => ConnectionStatus::RetryWaiting,
-        ConnectionState::Stopped => ConnectionStatus::Offline,
+        ConnectionState::NetworkUnavailable | ConnectionState::Stopped => ConnectionStatus::Offline,
     }
 }
 
@@ -87,8 +97,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut device = Device::default();
     let mut shell = Framebuffer::new(WINDOW_WIDTH, WINDOW_HEIGHT);
     let mut audio = if demo { Some(Audio::new()?) } else { None };
-    let (subscription, initial_status) = if demo {
-        (None, ConnectionStatus::Offline)
+    let (subscription, initial_status, mut network_path) = if demo {
+        (None, ConnectionStatus::Offline, None)
     } else {
         connect(config_path)
     };
@@ -98,6 +108,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         pager.tick(now);
         // This stage exposes connectivity only. Detection/snapshot processing is next.
         // Consume a bounded number per frame so traffic cannot stall input/rendering.
+        if let (Some(subscription), Some(monitor)) = (&subscription, &mut network_path) {
+            monitor.poll(subscription);
+        }
         let status = if let Some(subscription) = &subscription {
             for _ in subscription.messages.try_iter().take(64) {}
             connection_status(subscription)
@@ -192,4 +205,34 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod status_tests {
+    use super::*;
+    #[test]
+    fn only_fresh_connected_state_is_online_and_network_loss_takes_priority() {
+        assert_eq!(
+            status_from_state(ConnectionState::Connected, 0),
+            ConnectionStatus::Online
+        );
+        assert_eq!(
+            status_from_state(ConnectionState::Connected, 1),
+            ConnectionStatus::Overflow
+        );
+        for dropped in [0, 1] {
+            assert_eq!(
+                status_from_state(ConnectionState::NetworkUnavailable, dropped),
+                ConnectionStatus::Offline
+            );
+            assert_eq!(
+                status_from_state(ConnectionState::Connecting, dropped),
+                ConnectionStatus::Connecting
+            );
+            assert_eq!(
+                status_from_state(ConnectionState::Stopped, dropped),
+                ConnectionStatus::Offline
+            );
+        }
+    }
 }

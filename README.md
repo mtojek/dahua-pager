@@ -4,7 +4,9 @@ Alarm pager for Dahua NVRs, written in Rust. macOS first, ESP32-S3 later.
 
 The NVR client supports Digest authentication, camera discovery, snapshots and
 reconnecting event streams. The desktop UI has a standby screen with live NVR
-connection status. Real detection/snapshot handling in the UI comes next.
+connection status. macOS route changes cancel stale connections; 15 seconds
+without valid messages also triggers reconnect. Real detection/snapshot handling
+in the UI comes next.
 
 ## Run
 

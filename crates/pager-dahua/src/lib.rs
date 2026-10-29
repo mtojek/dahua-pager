@@ -28,6 +28,7 @@ const MAX_SNAPSHOT: u64 = 8 * 1024 * 1024;
 pub enum Error {
     Config,
     Transport,
+    HeartbeatTimeout,
     Authentication,
     Http(u16),
     Protocol,
@@ -252,10 +253,15 @@ fn map_io(error: io::Error) -> Error {
 
 pub struct DahuaClient {
     client: Client,
+    stream_client: reqwest::Client,
     config: NvrConfig,
     base: Url,
 }
 impl DahuaClient {
+    /// Target for platform reachability checks; never log or publish this value.
+    pub fn network_host(&self) -> &str {
+        self.base.host_str().unwrap_or("")
+    }
     /// Fetch channel titles without logging the private response or camera names.
     pub fn cameras(&self) -> Result<Vec<Camera>> {
         let response = self.get(CHANNEL_TITLES_PATH)?;
@@ -310,11 +316,64 @@ impl DahuaClient {
             .connect_timeout(Duration::from_secs(config.connect_timeout_secs))
             .timeout(Duration::from_secs(config.session_timeout_secs))
             .tls_danger_accept_invalid_certs(config.tls_insecure);
+        let stream_client = reqwest::Client::builder()
+            .no_proxy()
+            .redirect(Policy::none())
+            .connect_timeout(Duration::from_secs(config.connect_timeout_secs))
+            .read_timeout(Duration::from_secs(config.session_timeout_secs))
+            .tls_danger_accept_invalid_certs(config.tls_insecure)
+            .build()
+            .map_err(|_| Error::Config)?;
         Ok(Self {
             client: builder.build().map_err(|_| Error::Config)?,
+            stream_client,
             config,
             base,
         })
+    }
+    async fn open_event_stream(&self) -> Result<(reqwest::Response, String)> {
+        let url = self.base.join(EVENTS_PATH).map_err(|_| Error::Config)?;
+        let send = || self.stream_client.get(url.clone());
+        let mut response = match self.config.auth {
+            Auth::Basic => {
+                send()
+                    .basic_auth(&self.config.username, Some(&self.config.password))
+                    .send()
+                    .await
+            }
+            Auth::Digest => send().send().await,
+        }
+        .map_err(|_| Error::Transport)?;
+        if response.status() == StatusCode::UNAUTHORIZED && matches!(self.config.auth, Auth::Digest)
+        {
+            let challenge = response
+                .headers()
+                .get_all(WWW_AUTHENTICATE)
+                .iter()
+                .filter_map(|v| v.to_str().ok())
+                .find(|v| v.starts_with("Digest "))
+                .ok_or(Error::Authentication)?;
+            let mut prompt = digest_auth::parse(challenge).map_err(|_| Error::Authentication)?;
+            let uri = format!("{}?{}", url.path(), url.query().unwrap_or(""));
+            let context =
+                digest_auth::AuthContext::new(&self.config.username, &self.config.password, &uri);
+            let header = prompt
+                .respond(&context)
+                .map_err(|_| Error::Authentication)?
+                .to_string();
+            response = send()
+                .header("Authorization", header)
+                .send()
+                .await
+                .map_err(|_| Error::Transport)?;
+        }
+        match response.status().as_u16() {
+            200 => {}
+            401 | 403 => return Err(Error::Authentication),
+            code => return Err(Error::Http(code)),
+        }
+        let boundary = event_boundary(response.headers())?;
+        Ok((response, boundary))
     }
     fn get(&self, path: &str) -> Result<Response> {
         let url = self.base.join(path).map_err(|_| Error::Config)?;
@@ -362,32 +421,8 @@ impl DahuaClient {
     }
     pub fn events(&self) -> Result<MultipartReader<Response>> {
         let response = self.get(EVENTS_PATH)?;
-        let content_type = response
-            .headers()
-            .get(CONTENT_TYPE)
-            .and_then(|v| v.to_str().ok())
-            .ok_or(Error::Protocol)?;
-        let mut parts = content_type.split(';');
-        if !parts
-            .next()
-            .unwrap_or("")
-            .trim()
-            .eq_ignore_ascii_case("multipart/x-mixed-replace")
-        {
-            return Err(Error::Protocol);
-        }
-        let mut boundary = None;
-        for part in parts {
-            if let Some((key, value)) = part.trim().split_once('=')
-                && key.eq_ignore_ascii_case("boundary")
-            {
-                if boundary.is_some() {
-                    return Err(Error::Protocol);
-                }
-                boundary = Some(value.trim().trim_matches('"').to_owned());
-            }
-        }
-        MultipartReader::new(response, &boundary.ok_or(Error::Protocol)?)
+        let boundary = event_boundary(response.headers())?;
+        MultipartReader::new(response, &boundary)
     }
     pub fn snapshot(&self, channel: u32) -> Result<Vec<u8>> {
         if channel == 0 {
@@ -428,4 +463,35 @@ impl DahuaClient {
         }
         Ok(bytes)
     }
+}
+
+fn event_boundary(headers: &reqwest::header::HeaderMap) -> Result<String> {
+    let content_type = headers
+        .get(CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .ok_or(Error::Protocol)?;
+    let mut parts = content_type.split(';');
+    if !parts
+        .next()
+        .unwrap_or("")
+        .trim()
+        .eq_ignore_ascii_case("multipart/x-mixed-replace")
+    {
+        return Err(Error::Protocol);
+    }
+    let mut boundary = None;
+    for part in parts {
+        if let Some((key, value)) = part.trim().split_once('=')
+            && key.eq_ignore_ascii_case("boundary")
+        {
+            if boundary.is_some() {
+                return Err(Error::Protocol);
+            }
+            boundary = Some(value.trim().trim_matches('"').to_owned());
+        }
+    }
+    let boundary = boundary.ok_or(Error::Protocol)?;
+    // Reuse the same boundary validation for both transports.
+    MultipartReader::new(std::io::empty(), &boundary)?;
+    Ok(boundary)
 }

@@ -639,3 +639,138 @@ fn slow_consumer_has_bounded_mailbox_and_visible_dropped_count() {
     subscription.stop();
     handle.join().unwrap();
 }
+
+#[test]
+fn network_loss_invalidates_online_and_reconnects_without_waiting_for_tcp_timeout() {
+    let (hold_tx, hold_rx) = std::sync::mpsc::channel();
+    let (url, handle) = server(move |listener| {
+        let mut original = accept(&listener);
+        request(&mut original);
+        original.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: multipart/x-mixed-replace; boundary=b\r\nConnection: close\r\n\r\n--b\r\nContent-Length: 9\r\n\r\nHeartbeat\r\n").unwrap();
+        original.flush().unwrap();
+        // The original TCP connection remains open and silent throughout recovery.
+        let mut fresh = accept(&listener);
+        request(&mut fresh);
+        response(
+            &mut fresh,
+            "200 OK",
+            "Content-Type: multipart/x-mixed-replace; boundary=b\r\n",
+            b"--b\r\nContent-Length: 9\r\n\r\nHeartbeat\r\n--b--\r\n",
+        );
+        let _ = hold_rx.recv_timeout(Duration::from_secs(3));
+    });
+    let mut cfg = config(url);
+    cfg.session_timeout_secs = 60;
+    let subscription = DahuaClient::new(cfg)
+        .unwrap()
+        .subscribe_with_retry(fast_retry())
+        .unwrap();
+    subscription
+        .messages
+        .recv_timeout(Duration::from_secs(2))
+        .unwrap();
+    assert_eq!(subscription.state(), ConnectionState::Connected);
+    subscription.set_network_available(false);
+    assert_eq!(subscription.state(), ConnectionState::NetworkUnavailable);
+    // A brief down/up must discard the old connection even if changes coalesce.
+    subscription.set_network_available(true);
+    assert_ne!(subscription.state(), ConnectionState::Connected);
+    assert_eq!(
+        subscription
+            .messages
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap(),
+        Message::Heartbeat
+    );
+    subscription.stop();
+    let _ = hold_tx.send(());
+    handle.join().unwrap();
+}
+
+#[test]
+fn missing_complete_messages_expires_online_even_when_partial_bytes_keep_arriving() {
+    let (url, handle) = server(|listener| {
+        let mut original = accept(&listener);
+        request(&mut original);
+        original.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: multipart/x-mixed-replace; boundary=b\r\nConnection: close\r\n\r\n--b\r\nContent-Length: 9\r\n\r\nHeartbeat\r\n").unwrap();
+        original.flush().unwrap();
+        // Trickle incomplete data so an ordinary per-read timeout would never fire.
+        for _ in 0..7 {
+            thread::sleep(Duration::from_millis(40));
+            if original.write_all(b"\r").is_err() {
+                break;
+            }
+            let _ = original.flush();
+        }
+        let mut restored = accept(&listener);
+        request(&mut restored);
+        response(
+            &mut restored,
+            "200 OK",
+            "Content-Type: multipart/x-mixed-replace; boundary=b\r\n",
+            b"--b\r\nContent-Length: 9\r\n\r\nHeartbeat\r\n--b--\r\n",
+        );
+    });
+    let mut cfg = config(url);
+    cfg.session_timeout_secs = 60;
+    let subscription = DahuaClient::new(cfg)
+        .unwrap()
+        .subscribe_with_liveness(fast_retry(), Duration::from_millis(150))
+        .unwrap();
+    assert_eq!(
+        subscription
+            .messages
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap(),
+        Message::Heartbeat
+    );
+    let deadline = Instant::now() + Duration::from_millis(800);
+    while subscription.state() == ConnectionState::Connected {
+        assert!(
+            Instant::now() < deadline,
+            "ONLINE must expire without complete messages"
+        );
+        thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(
+        subscription
+            .messages
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap(),
+        Message::Heartbeat
+    );
+    subscription.stop();
+    handle.join().unwrap();
+}
+
+#[test]
+fn stopping_cancels_an_active_read_instead_of_leaving_a_hung_worker() {
+    let (closed_tx, closed_rx) = std::sync::mpsc::channel();
+    let (url, handle) = server(move |listener| {
+        let mut stream = accept(&listener);
+        request(&mut stream);
+        stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: multipart/x-mixed-replace; boundary=b\r\nConnection: close\r\n\r\n--b\r\nContent-Length: 9\r\n\r\nHeartbeat\r\n").unwrap();
+        stream.flush().unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        let mut byte = [0];
+        let closed = match stream.read(&mut byte) {
+            Ok(0) => true,
+            Err(error) => error.kind() == std::io::ErrorKind::ConnectionReset,
+            _ => false,
+        };
+        closed_tx.send(closed).unwrap();
+    });
+    let mut cfg = config(url);
+    cfg.session_timeout_secs = 60;
+    let subscription = DahuaClient::new(cfg).unwrap().subscribe().unwrap();
+    subscription
+        .messages
+        .recv_timeout(Duration::from_secs(2))
+        .unwrap();
+    subscription.stop();
+    assert_eq!(subscription.state(), ConnectionState::Stopped);
+    assert!(closed_rx.recv_timeout(Duration::from_secs(2)).unwrap());
+    handle.join().unwrap();
+}
