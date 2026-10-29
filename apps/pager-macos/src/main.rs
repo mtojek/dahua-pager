@@ -31,6 +31,14 @@ use audio::Audio;
 mod history;
 use history::EventHistory;
 
+type LcdPixels = Vec<Rgb565>;
+type SnapshotResult = Result<LcdPixels, DahuaError>;
+type SnapshotReceiver = Receiver<SnapshotResult>;
+type AlarmSnapshotResult = Result<(LcdPixels, Vec<u8>), DahuaError>;
+type AlarmSnapshotResults = Receiver<(u64, AlarmSnapshotResult)>;
+type AlarmSnapshotRequests = SyncSender<(u64, u32)>;
+type HistorySnapshotResults = Receiver<Result<LcdPixels, String>>;
+
 fn log(level: &str, message: impl std::fmt::Display) {
     eprintln!(
         "[{}] {level} {message}",
@@ -268,7 +276,7 @@ fn decode_snapshot(jpeg: &[u8]) -> Option<Vec<Rgb565>> {
     )
 }
 
-fn fetch_snapshot(client: &DahuaClient, channel: u32) -> Receiver<Result<Vec<Rgb565>, DahuaError>> {
+fn fetch_snapshot(client: &DahuaClient, channel: u32) -> SnapshotReceiver {
     let client = client.clone();
     let (sender, receiver) = mpsc::channel();
     std::thread::spawn(move || {
@@ -282,10 +290,7 @@ fn fetch_snapshot(client: &DahuaClient, channel: u32) -> Receiver<Result<Vec<Rgb
 
 fn start_alarm_snapshot_worker(
     client: DahuaClient,
-) -> (
-    SyncSender<(u64, u32)>,
-    Receiver<(u64, Result<(Vec<Rgb565>, Vec<u8>), DahuaError>)>,
-) {
+) -> (AlarmSnapshotRequests, AlarmSnapshotResults) {
     let (request_tx, request_rx) = mpsc::sync_channel::<(u64, u32)>(128);
     let (result_tx, result_rx) = mpsc::channel();
     std::thread::spawn(move || {
@@ -299,19 +304,15 @@ fn start_alarm_snapshot_worker(
                     .map(|pixels| (pixels, jpeg))
                     .ok_or(DahuaError::Snapshot)
             });
-            if result.is_ok() {
-                log(
+            match &result {
+                Ok(_) => log(
                     "SNAPSHOT",
                     format!("request completed alarm={sequence} channel={channel}"),
-                );
-            } else {
-                log(
+                ),
+                Err(error) => log(
                     "SNAPSHOT ERROR",
-                    format!(
-                        "request failed alarm={sequence} channel={channel}: {}",
-                        result.as_ref().err().expect("checked error")
-                    ),
-                );
+                    format!("request failed alarm={sequence} channel={channel}: {error}"),
+                ),
             }
             if result_tx.send((sequence, result)).is_err() {
                 log("SNAPSHOT", "UI closed; stopping snapshot worker");
@@ -472,7 +473,7 @@ fn initial_areas(config_path: &str) -> Vec<AreaCamera> {
 fn begin_selected_snapshot(
     client: Option<&DahuaClient>,
     ui: &mut Ui,
-) -> Option<(u32, Receiver<Result<Vec<Rgb565>, DahuaError>>)> {
+) -> Option<(u32, SnapshotReceiver)> {
     let index = ui.cameras().get(ui.selected_camera())?.index;
     client
         .map(|client| (index, fetch_snapshot(client, index)))
@@ -596,7 +597,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         saved_camera_count.min(6)
     };
     let mut camera_refresh = None;
-    let mut snapshot_receiver: Option<(u32, Receiver<Result<Vec<Rgb565>, DahuaError>>)> = None;
+    let mut snapshot_receiver: Option<(u32, SnapshotReceiver)> = None;
     let (alarm_snapshot_tx, alarm_snapshot_rx) = camera_client
         .clone()
         .map(start_alarm_snapshot_worker)
@@ -605,7 +606,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut seen_event_ids = std::collections::VecDeque::<(u32, u64)>::new();
     let mut snapshot_history_ids = std::collections::HashMap::<u64, u64>::new();
     let mut history_snapshot_attempt = None;
-    let mut history_snapshot_receiver: Option<(u64, Receiver<Result<Vec<Rgb565>, String>>)> = None;
+    let mut history_snapshot_receiver: Option<(u64, HistorySnapshotResults)> = None;
     let mut previous_connection_status = initial_status;
     let mut previous_dropped_messages = 0;
     let mut previous_sounding = pager.sounding();
@@ -1063,21 +1064,21 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
         let mouse_down = window.get_mouse_down(MouseButton::Left);
         if mouse_down {
-            if ui.screen == pager_ui::Screen::AreaEditor {
-                if let Some(point) = point {
-                    let lcd_point = point - device::LCD_ORIGIN;
-                    if left_was_down {
-                        ui.continue_area_paint(lcd_point);
-                    } else {
-                        ui.begin_area_paint(lcd_point);
-                        log(
-                            "AREAS",
-                            format!(
-                                "paint gesture started camera_position={}",
-                                ui.selected_camera() + 1
-                            ),
-                        );
-                    }
+            if ui.screen == pager_ui::Screen::AreaEditor
+                && let Some(point) = point
+            {
+                let lcd_point = point - device::LCD_ORIGIN;
+                if left_was_down {
+                    ui.continue_area_paint(lcd_point);
+                } else {
+                    ui.begin_area_paint(lcd_point);
+                    log(
+                        "AREAS",
+                        format!(
+                            "paint gesture started camera_position={}",
+                            ui.selected_camera() + 1
+                        ),
+                    );
                 }
             }
             lcd_down = point.is_some_and(|p| {
@@ -1098,13 +1099,12 @@ fn main() -> Result<(), Box<dyn Error>> {
             if let Some(p) = point {
                 let lcd_point = p - device::LCD_ORIGIN;
                 let previous_screen = ui.screen;
-                if ui.screen != pager_ui::Screen::AreaEditor {
-                    if ui.lcd_click(lcd_point, &mut pager) {
-                        log(
-                            "UI",
-                            format!("LCD click opened {:?} -> {:?}", previous_screen, ui.screen),
-                        );
-                    }
+                if ui.screen != pager_ui::Screen::AreaEditor && ui.lcd_click(lcd_point, &mut pager)
+                {
+                    log(
+                        "UI",
+                        format!("LCD click opened {:?} -> {:?}", previous_screen, ui.screen),
+                    );
                 }
                 if previous_screen == pager_ui::Screen::Settings
                     && ui.screen == pager_ui::Screen::AreaCameras

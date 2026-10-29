@@ -690,6 +690,37 @@ fn parse_bool(value: &str) -> Result<bool> {
     }
 }
 
+fn event_boundary(headers: &reqwest::header::HeaderMap) -> Result<String> {
+    let content_type = headers
+        .get(CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .ok_or(Error::Protocol)?;
+    let mut parts = content_type.split(';');
+    if !parts
+        .next()
+        .unwrap_or("")
+        .trim()
+        .eq_ignore_ascii_case("multipart/x-mixed-replace")
+    {
+        return Err(Error::Protocol);
+    }
+    let mut boundary = None;
+    for part in parts {
+        if let Some((key, value)) = part.trim().split_once('=')
+            && key.eq_ignore_ascii_case("boundary")
+        {
+            if boundary.is_some() {
+                return Err(Error::Protocol);
+            }
+            boundary = Some(value.trim().trim_matches('"').to_owned());
+        }
+    }
+    let boundary = boundary.ok_or(Error::Protocol)?;
+    // Reuse the same boundary validation for both transports.
+    MultipartReader::new(std::io::empty(), &boundary)?;
+    Ok(boundary)
+}
+
 #[cfg(test)]
 mod camera_settings_tests {
     use super::{CameraSettings, Config};
@@ -779,35 +810,4 @@ mod camera_settings_tests {
         let config: Config = serde_json::from_value(value).unwrap();
         assert!(!config.demo_mode);
     }
-}
-
-fn event_boundary(headers: &reqwest::header::HeaderMap) -> Result<String> {
-    let content_type = headers
-        .get(CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .ok_or(Error::Protocol)?;
-    let mut parts = content_type.split(';');
-    if !parts
-        .next()
-        .unwrap_or("")
-        .trim()
-        .eq_ignore_ascii_case("multipart/x-mixed-replace")
-    {
-        return Err(Error::Protocol);
-    }
-    let mut boundary = None;
-    for part in parts {
-        if let Some((key, value)) = part.trim().split_once('=')
-            && key.eq_ignore_ascii_case("boundary")
-        {
-            if boundary.is_some() {
-                return Err(Error::Protocol);
-            }
-            boundary = Some(value.trim().trim_matches('"').to_owned());
-        }
-    }
-    let boundary = boundary.ok_or(Error::Protocol)?;
-    // Reuse the same boundary validation for both transports.
-    MultipartReader::new(std::io::empty(), &boundary)?;
-    Ok(boundary)
 }

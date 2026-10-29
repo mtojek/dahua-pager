@@ -1294,12 +1294,13 @@ mod tests {
         }
     }
     #[test]
-    fn all_modes_and_connection_states_fit_and_keep_center_empty() {
+    fn all_modes_and_connection_states_keep_recent_events_body_unchanged() {
         let ui = Ui::default();
         let mut pager = Pager::default();
         for mode in [Mode::Armed, Mode::Muted, Mode::Disarmed] {
             pager.set_mode(mode);
             let mut previous_bar = None;
+            let mut reference_body = None;
             for status in [
                 ConnectionStatus::NoConfig,
                 ConnectionStatus::ConfigError,
@@ -1321,10 +1322,11 @@ mod tests {
                     Mode::Muted => assert!(bar.r() > bar.b() && bar.g() > bar.b()),
                     Mode::Disarmed => assert!(bar.g() > bar.r() && bar.g() > bar.b()),
                 }
-                for y in 25..300 {
-                    for x in 0..480 {
-                        assert_eq!(canvas.0[y * 480 + x], BACKGROUND);
-                    }
+                let body = canvas.0[25 * 480..300 * 480].to_vec();
+                if let Some(reference) = &reference_body {
+                    assert_eq!(&body, reference);
+                } else {
+                    reference_body = Some(body);
                 }
             }
         }
