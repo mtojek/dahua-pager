@@ -3,11 +3,21 @@
 Design for the 480 × 320 ILI9488 display. The macOS simulator uses scale 1:1;
 the additional case area holds physical controls outside the LCD. Mouse input
 stands in for touch. These documents describe the target UI.
-Standby is implemented. Settings has the menu layout with upcoming sections;
-History is a navigation shell. Other views remain planned.
+Standby and the macOS Area Settings camera list/editor are implemented. History
+is still a placeholder; alarm handling and scheduling remain planned.
 
-- [Screens](screens.md): layout, actions and navigation.
-- [Schedule](schedule.md): weekly ARMED / MUTED / DISARMED periods.
+**Do not recreate `screens.md`.** Keep the screen backlog in this file.
+
+## Screens still to implement
+
+- **History:** browse saved detections with their snapshots and marked rectangles; Prev/Next changes the selected record, Back returns.
+- **Alarm:** show the active alarm snapshot and marked rectangle; ACK confirms all alarms received up to that moment, then Back returns.
+- **Schedule editor:** configure weekly ARMED / MUTED / DISARMED periods. See [schedule.md](schedule.md) for the current proposal.
+- **ESP32 port:** bring the working macOS Area Settings camera list and mask editor to the device UI, including physical-button navigation and the LCD legend.
+
+Standby, Settings menu, and the macOS Area Settings flow are already implemented;
+do not list them as new screens to create.
+
 - [Implementation plan](../../PLAN.md): stages, hardware and integration work.
 
 ## Modes and acknowledgement
@@ -39,8 +49,8 @@ minutes per sound episode; concurrent alarms do not extend that deadline.
 
 ```text
 Standby ── History ── Back
-        └─ Settings ── Ustawienia obszaru ── Camera ── Area editor
-                    └─ Harmonogram
+        └─ Settings ── Area Settings ── Camera ── Area editor
+                    └─ Schedule
 
 New alarm ── Alarm ── ACK all received ── Back ── Standby
 ```

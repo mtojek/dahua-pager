@@ -5,7 +5,7 @@ use embedded_graphics::{
     },
     pixelcolor::Rgb565,
     prelude::*,
-    primitives::{PrimitiveStyle, Rectangle},
+    primitives::{Circle, PrimitiveStyle, Rectangle},
     text::{Alignment, Text},
 };
 use pager_core::{Mode, Pager};
@@ -19,6 +19,10 @@ const BACKGROUND: Rgb565 = Rgb565::new(1, 3, 2);
 const BORDER: Rgb565 = Rgb565::new(4, 8, 5);
 const SECONDARY: Rgb565 = Rgb565::new(18, 38, 19);
 const PRIMARY: Rgb565 = Rgb565::new(28, 58, 29);
+const CAMERA_ROW_TOP: i32 = 34;
+const CAMERA_ROW_STEP: i32 = 37;
+const CAMERA_ROW_HEIGHT: u32 = 36;
+const CAMERA_VISIBLE_ROWS: usize = 7;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Screen {
@@ -38,6 +42,10 @@ pub enum Action {
     Wake,
     OpenAreas,
     SelectAreaCamera,
+    Previous,
+    Next,
+    PreviousCamera,
+    NextCamera,
     SaveAreas,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -65,13 +73,11 @@ impl ConnectionStatus {
 }
 
 const MAIN_ACTIONS: [Action; 4] = [
-    Action::Sleep,
-    Action::CycleMode,
     Action::History,
     Action::Settings,
+    Action::Sleep,
+    Action::CycleMode,
 ];
-const BACK_ACTIONS: [Action; 1] = [Action::Back];
-const EDITOR_ACTIONS: [Action; 2] = [Action::Back, Action::SaveAreas];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AreaCamera {
@@ -146,14 +152,36 @@ impl Ui {
     pub fn wake_if_asleep(&mut self) -> bool {
         std::mem::replace(&mut self.asleep, false)
     }
-    fn actions(&self) -> &'static [Action] {
-        if self.screen == Screen::Standby {
-            &MAIN_ACTIONS
-        } else if self.screen == Screen::AreaEditor {
-            &EDITOR_ACTIONS
-        } else {
-            &BACK_ACTIONS
+    pub fn physical_actions(&self) -> [Option<Action>; 4] {
+        if self.asleep {
+            return [Some(Action::Wake); 4];
         }
+        match self.screen {
+            Screen::Standby => MAIN_ACTIONS.map(Some),
+            Screen::History => [
+                Some(Action::Previous),
+                Some(Action::Next),
+                Some(Action::Back),
+                None,
+            ],
+            Screen::Settings => [None, None, Some(Action::Back), None],
+            Screen::AreaCameras
+                if !self.camera_loading && !self.camera_load_error && !self.cameras.is_empty() =>
+            {
+                [
+                    Some(Action::PreviousCamera),
+                    Some(Action::NextCamera),
+                    Some(Action::Back),
+                    Some(Action::SelectAreaCamera),
+                ]
+            }
+            Screen::AreaCameras => [None, None, Some(Action::Back), None],
+            Screen::AreaEditor => [None, None, Some(Action::Back), Some(Action::SaveAreas)],
+        }
+    }
+
+    fn actions(&self) -> Vec<Action> {
+        self.physical_actions().into_iter().flatten().collect()
     }
     pub fn move_focus(&mut self, forward: bool) {
         let actions = self.actions();
@@ -217,6 +245,16 @@ impl Ui {
                 self.screen = Screen::AreaEditor;
                 self.focus = None;
             }
+            Action::Previous => pager.navigate(false),
+            Action::Next => pager.navigate(true),
+            Action::PreviousCamera if !self.cameras.is_empty() => {
+                self.selected_camera =
+                    (self.selected_camera + self.cameras.len() - 1) % self.cameras.len();
+            }
+            Action::NextCamera if !self.cameras.is_empty() => {
+                self.selected_camera = (self.selected_camera + 1) % self.cameras.len();
+            }
+            Action::PreviousCamera | Action::NextCamera => {}
             Action::SaveAreas => {}
             Action::Back => {
                 self.screen = match self.screen {
@@ -259,6 +297,12 @@ impl Ui {
 
     pub fn selected_camera(&self) -> usize {
         self.selected_camera
+    }
+
+    fn camera_scroll_start(&self) -> usize {
+        self.selected_camera
+            .saturating_add(1)
+            .saturating_sub(CAMERA_VISIBLE_ROWS)
     }
 
     pub fn set_camera_image(&mut self, index: u32, image: Option<Vec<Rgb565>>) {
@@ -343,10 +387,11 @@ impl Ui {
                 self.focus = None;
                 true
             }
-            Screen::AreaCameras if (34..256).contains(&point.y) && point.x >= 12 => {
-                let row = ((point.y - 34) / 37) as usize;
-                if row < self.cameras.len() {
-                    self.selected_camera = row;
+            Screen::AreaCameras if (CAMERA_ROW_TOP..293).contains(&point.y) && point.x >= 12 => {
+                let row = ((point.y - CAMERA_ROW_TOP) / CAMERA_ROW_STEP) as usize;
+                let index = self.camera_scroll_start() + row;
+                if index < self.cameras.len() {
+                    self.selected_camera = index;
                     self.cameras[row].snapshot_loading = true;
                     self.cameras[row].snapshot_error = false;
                     self.cameras[row].image = None;
@@ -448,6 +493,7 @@ impl Ui {
                 )?;
             }
         }
+        render_button_legend(display, self)?;
         Ok(())
     }
     /// Captions for physical controls; the platform shell draws them outside LCD.
@@ -460,9 +506,53 @@ impl Ui {
             Action::Back => "Back",
             Action::Wake => "Wake",
             Action::OpenAreas | Action::SelectAreaCamera => "Select",
+            Action::Previous | Action::PreviousCamera => "Prev",
+            Action::Next | Action::NextCamera => "Next",
             Action::SaveAreas => "Save",
         }
     }
+}
+
+fn render_button_legend<D: DrawTarget<Color = Rgb565>>(
+    display: &mut D,
+    ui: &Ui,
+) -> Result<(), D::Error> {
+    const COLORS: [Rgb565; 4] = [
+        Rgb565::new(6, 48, 10),
+        Rgb565::new(30, 51, 3),
+        Rgb565::new(28, 6, 5),
+        Rgb565::new(4, 20, 30),
+    ];
+    let actions = ui.physical_actions();
+    const LEFT_GROUP: [usize; 2] = [0, 1];
+    const RIGHT_GROUP: [usize; 2] = [3, 2];
+    for (indices, align_right) in [(&LEFT_GROUP, false), (&RIGHT_GROUP, true)] {
+        let active: Vec<(usize, Action)> = indices
+            .iter()
+            .filter_map(|&index| actions[index].map(|action| (index, action)))
+            .collect();
+        let group_width: i32 = active
+            .iter()
+            .map(|(_, action)| 14 + ui.caption(*action).len() as i32 * 9)
+            .sum::<i32>()
+            + 16 * active.len().saturating_sub(1) as i32;
+        let mut left = if align_right { 464 - group_width } else { 16 };
+        for (index, action) in active {
+            Circle::new(Point::new(left, 304), 8)
+                .into_styled(PrimitiveStyle::with_fill(COLORS[index]))
+                .draw(display)?;
+            let caption = ui.caption(action).to_ascii_uppercase();
+            text(
+                display,
+                &caption,
+                Point::new(left + 14, 312),
+                Alignment::Left,
+                Rgb565::WHITE,
+            )?;
+            left += 14 + caption.len() as i32 * 9 + 16;
+        }
+    }
+    Ok(())
 }
 
 fn render_area_cameras<D: DrawTarget<Color = Rgb565>>(
@@ -496,8 +586,24 @@ fn render_area_cameras<D: DrawTarget<Color = Rgb565>>(
             SECONDARY,
         );
     }
-    for (i, camera) in ui.cameras.iter().enumerate() {
-        let top = 34 + i as i32 * 37;
+    let first = ui.camera_scroll_start();
+    for (row, (i, camera)) in ui
+        .cameras
+        .iter()
+        .enumerate()
+        .skip(first)
+        .take(CAMERA_VISIBLE_ROWS)
+        .enumerate()
+    {
+        let top = CAMERA_ROW_TOP + row as i32 * CAMERA_ROW_STEP;
+        if i == ui.selected_camera {
+            Rectangle::new(Point::new(12, top), Size::new(456, CAMERA_ROW_HEIGHT))
+                .into_styled(PrimitiveStyle::with_fill(Rgb565::new(2, 12, 24)))
+                .draw(display)?;
+            Rectangle::new(Point::new(12, top), Size::new(456, CAMERA_ROW_HEIGHT))
+                .into_styled(PrimitiveStyle::with_stroke(Rgb565::new(8, 28, 31), 1))
+                .draw(display)?;
+        }
         text(
             display,
             &camera.name,
@@ -516,7 +622,7 @@ fn render_area_cameras<D: DrawTarget<Color = Rgb565>>(
             MonoTextStyle::new(&FONT_6X10, SECONDARY),
         )
         .draw(display)?;
-        if i < ui.cameras.len() - 1 {
+        if i < ui.cameras.len() - 1 && row < CAMERA_VISIBLE_ROWS - 1 {
             Rectangle::new(Point::new(16, top + 35), Size::new(448, 1))
                 .into_styled(PrimitiveStyle::with_fill(BORDER))
                 .draw(display)?;
@@ -680,9 +786,9 @@ mod tests {
     fn keyboard_focus_wraps_between_physical_actions() {
         let mut ui = Ui::default();
         ui.move_focus(false);
-        assert_eq!(ui.focused_action(), Some(Action::Settings));
+        assert_eq!(ui.focused_action(), Some(Action::CycleMode));
         ui.move_focus(true);
-        assert_eq!(ui.focused_action(), Some(Action::Sleep));
+        assert_eq!(ui.focused_action(), Some(Action::History));
     }
     struct Canvas(Vec<Rgb565>);
     impl OriginDimensions for Canvas {
@@ -698,7 +804,7 @@ mod tests {
             pixels: I,
         ) -> Result<(), Self::Error> {
             for Pixel(p, c) in pixels {
-                assert!(self.bounding_box().contains(p));
+                assert!(self.bounding_box().contains(p), "out of bounds: {p:?}");
                 self.0[p.y as usize * 480 + p.x as usize] = c;
             }
             Ok(())
@@ -732,7 +838,7 @@ mod tests {
                     Mode::Muted => assert!(bar.r() > bar.b() && bar.g() > bar.b()),
                     Mode::Disarmed => assert!(bar.g() > bar.r() && bar.g() > bar.b()),
                 }
-                for y in 25..320 {
+                for y in 25..300 {
                     for x in 0..480 {
                         assert_eq!(canvas.0[y * 480 + x], BACKGROUND);
                     }
@@ -833,5 +939,86 @@ mod tests {
         assert!(!ui.cameras()[0].mask[0][0]);
         assert!(!ui.cameras()[0].mask[0][1]);
         ui.end_area_paint();
+    }
+
+    #[test]
+    fn camera_list_buttons_navigate_and_select_the_highlighted_camera() {
+        let mut ui = Ui::default();
+        let mut pager = Pager::default();
+        ui.set_cameras(vec![
+            AreaCamera::new(1, "Backyard"),
+            AreaCamera::new(2, "Garage"),
+        ]);
+        ui.screen = Screen::AreaCameras;
+
+        assert_eq!(
+            ui.physical_actions(),
+            [
+                Some(Action::PreviousCamera),
+                Some(Action::NextCamera),
+                Some(Action::Back),
+                Some(Action::SelectAreaCamera),
+            ]
+        );
+        ui.apply(Action::PreviousCamera, &mut pager);
+        assert_eq!(ui.selected_camera(), 1);
+        ui.apply(Action::NextCamera, &mut pager);
+        assert_eq!(ui.selected_camera(), 0);
+        ui.apply(Action::NextCamera, &mut pager);
+        ui.apply(Action::SelectAreaCamera, &mut pager);
+        assert_eq!(ui.screen, Screen::AreaEditor);
+        assert!(ui.cameras()[1].snapshot_loading);
+        assert_eq!(
+            ui.physical_actions(),
+            [None, None, Some(Action::Back), Some(Action::SaveAreas)]
+        );
+    }
+
+    #[test]
+    fn lcd_legend_uses_the_physical_button_colors() {
+        let mut ui = Ui::default();
+        let pager = Pager::default();
+        let mut canvas = Canvas(vec![Rgb565::BLACK; 480 * 320]);
+        ui.render(&mut canvas, &pager, ConnectionStatus::Online, "22:15")
+            .unwrap();
+        assert_eq!(canvas.0[308 * 480 + 20], Rgb565::new(6, 48, 10));
+        assert_eq!(canvas.0[308 * 480 + 113], Rgb565::new(30, 51, 3));
+
+        ui.screen = Screen::Settings;
+        let mut settings_canvas = Canvas(vec![Rgb565::BLACK; 480 * 320]);
+        ui.render(
+            &mut settings_canvas,
+            &pager,
+            ConnectionStatus::Online,
+            "22:15",
+        )
+        .unwrap();
+        assert_eq!(settings_canvas.0[308 * 480 + 418], Rgb565::new(28, 6, 5));
+    }
+
+    #[test]
+    fn camera_selection_scroll_keeps_highlight_inside_the_list() {
+        let mut ui = Ui::default();
+        let mut pager = Pager::default();
+        ui.set_cameras(
+            (1..=10)
+                .map(|index| AreaCamera::new(index, format!("Camera {index}")))
+                .collect(),
+        );
+        ui.screen = Screen::AreaCameras;
+        for _ in 0..9 {
+            ui.apply(Action::NextCamera, &mut pager);
+        }
+        assert_eq!(ui.selected_camera(), 9);
+        assert_eq!(ui.camera_scroll_start(), 3);
+
+        let mut canvas = Canvas(vec![Rgb565::BLACK; 480 * 320]);
+        ui.render(&mut canvas, &pager, ConnectionStatus::Online, "22:15")
+            .unwrap();
+        assert_eq!(canvas.0[291 * 480 + 12], Rgb565::new(8, 28, 31));
+
+        assert!(ui.lcd_click(Point::new(20, 50), &mut pager));
+        assert_eq!(ui.selected_camera(), 3);
+        assert_eq!(ui.screen, Screen::AreaEditor);
     }
 }

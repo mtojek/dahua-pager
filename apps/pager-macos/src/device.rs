@@ -26,23 +26,6 @@ const COLORS: [Rgb565; 4] = [
     Rgb565::new(4, 20, 30),
 ];
 
-fn actions(ui: &Ui) -> [Option<Action>; 4] {
-    if ui.is_asleep() {
-        [Some(Action::Wake); 4]
-    } else if ui.screen == Screen::Standby {
-        [
-            Some(Action::History),
-            Some(Action::Settings),
-            Some(Action::Sleep),
-            Some(Action::CycleMode),
-        ]
-    } else if ui.screen == Screen::AreaEditor {
-        [None, None, Some(Action::Back), Some(Action::SaveAreas)]
-    } else {
-        [None, None, Some(Action::Back), None]
-    }
-}
-
 #[derive(Default)]
 pub struct Device {
     down: bool,
@@ -53,7 +36,7 @@ impl Device {
         self.pressed = None;
     }
     pub fn hit_test(&self, ui: &Ui, point: Point) -> Option<Action> {
-        for (i, action) in actions(ui).iter().enumerate() {
+        for (i, action) in ui.physical_actions().iter().enumerate() {
             let delta = point - CENTERS[i];
             if delta.x * delta.x + delta.y * delta.y < RADIUS * RADIUS {
                 return *action;
@@ -90,7 +73,7 @@ impl Device {
             frame.pixels[start..start + WIDTH as usize]
                 .copy_from_slice(&lcd.pixels[y * WIDTH as usize..(y + 1) * WIDTH as usize]);
         }
-        for (i, action) in actions(ui).iter().enumerate() {
+        for (i, action) in ui.physical_actions().iter().enumerate() {
             let pressed = action.is_some_and(|a| self.pressed == Some((ui.screen, a)));
             let color = COLORS[i];
             let fill = if pressed {

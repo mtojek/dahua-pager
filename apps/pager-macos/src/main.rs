@@ -162,6 +162,19 @@ fn fetch_snapshot(client: &DahuaClient, channel: u32) -> Receiver<Result<Vec<Rgb
     receiver
 }
 
+fn begin_selected_snapshot(
+    client: Option<&DahuaClient>,
+    ui: &mut Ui,
+) -> Option<(u32, Receiver<Result<Vec<Rgb565>, DahuaError>>)> {
+    let index = ui.cameras().get(ui.selected_camera())?.index;
+    client
+        .map(|client| (index, fetch_snapshot(client, index)))
+        .or_else(|| {
+            ui.set_camera_image(index, None);
+            None
+        })
+}
+
 fn save_area_masks(config_path: &str, ui: &Ui) -> Result<(), DahuaError> {
     Config::load(config_path)?;
     let cameras = ui
@@ -320,7 +333,14 @@ fn main() -> Result<(), Box<dyn Error>> {
                     Key::Up | Key::Left => ui.move_focus(false),
                     Key::Enter | Key::Space => {
                         if let Some(action) = ui.focused_action() {
+                            let previous_screen = ui.screen;
                             ui.apply(action, &mut pager);
+                            if previous_screen == pager_ui::Screen::AreaCameras
+                                && ui.screen == pager_ui::Screen::AreaEditor
+                            {
+                                snapshot_receiver =
+                                    begin_selected_snapshot(camera_client.as_ref(), &mut ui);
+                            }
                             if action == Action::SaveAreas {
                                 if save_area_masks(config_path, &ui).is_ok() {
                                     ui.save_completed();
@@ -357,7 +377,13 @@ fn main() -> Result<(), Box<dyn Error>> {
             if let Some(action) =
                 device.pointer(&ui, window.get_mouse_down(MouseButton::Left), point)
             {
+                let previous_screen = ui.screen;
                 ui.apply(action, &mut pager);
+                if previous_screen == pager_ui::Screen::AreaCameras
+                    && ui.screen == pager_ui::Screen::AreaEditor
+                {
+                    snapshot_receiver = begin_selected_snapshot(camera_client.as_ref(), &mut ui);
+                }
                 if action == Action::SaveAreas {
                     if save_area_masks(config_path, &ui).is_ok() {
                         ui.save_completed();
@@ -410,13 +436,8 @@ fn main() -> Result<(), Box<dyn Error>> {
                     if previous_screen == pager_ui::Screen::AreaCameras
                         && ui.screen == pager_ui::Screen::AreaEditor
                     {
-                        let camera = &ui.cameras()[ui.selected_camera()];
-                        snapshot_receiver = camera_client
-                            .as_ref()
-                            .map(|client| (camera.index, fetch_snapshot(client, camera.index)));
-                        if snapshot_receiver.is_none() {
-                            ui.set_camera_image(camera.index, None);
-                        }
+                        snapshot_receiver =
+                            begin_selected_snapshot(camera_client.as_ref(), &mut ui);
                     }
                 }
                 lcd_down = false;
