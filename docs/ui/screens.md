@@ -5,20 +5,41 @@ placement, not exact pixel dimensions. Names below are synthetic examples.
 
 ## Standby
 
+Implemented on macOS. This preview is rendered at the logical display resolution;
+its clock and connection state are illustrative. The four circles are physical
+controls on the case, not touch buttons inside the LCD.
+
+![Standby screen](standby.png)
+
 ```text
-ARMED                  <status>              22:15
-
-
-                                  Disarm
-              Empty               Quiet
-
-
-History                           Settings
+┌──────────────────────────────────────────────┐
+│ ARMED              <status>            22:15  │
+│                                              │      🔴 Sleep
+│                   Empty                      │
+│                                              │      🔵 Mode
+│                                              │
+└──────────────────────────────────────────────┘
+                                🟢      🟡
+                              History Settings
 ```
 
+All actions drawn to the right/below the LCD in these sketches refer to the physical case buttons. Their colors stay fixed; captions depend on the screen.
+
 The main area stays empty while waiting. There is no default camera preview.
-Disarm selects DISARMED and becomes Arm. Quiet selects QUIET. The header shows
-the resulting mode; Arm restores ARMED. History and Settings open their screens.
+The red Sleep button blanks the LCD without changing monitoring mode, the NVR
+subscription or current audio. Any physical button wakes it; that first press is
+consumed and must not also open a view or change mode. Keyboard input also wakes
+the screen; even Escape only wakes it while asleep.
+
+The blue Mode button cycles **ARMED → MUTED → DISARMED → ARMED**. The header
+shows the resulting mode. MUTED records new alarms without sound; DISARMED ignores
+new detections. Mode changes never replay existing alarms. History and Settings currently open placeholder screens with Back; their
+full content below remains planned. Mouse clicks activate on release, and dragging
+off a circular physical button cancels it. Keyboard focus follows Tab/arrows; Enter activates it. Clicks inside the standby LCD do not activate the case controls.
+
+The normal app reads local config and shows the reconnecting NVR subscription's
+status. Received detection messages do not yet trigger GUI alarms. Missing or
+invalid config leaves the controls usable and shows a configuration status.
 
 ## History
 

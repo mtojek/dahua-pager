@@ -10,3 +10,5 @@ embedded-graphics.workspace = true
 pager-core.workspace = true
 pager-ui.workspace = true
 rodio = { version = "0.23.0", default-features = false, features = ["playback"] }
+pager-dahua = { path = "../../crates/pager-dahua" }
+chrono = { version = "0.4", default-features = false, features = ["clock"] }

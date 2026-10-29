@@ -6,6 +6,8 @@ use embedded_graphics::{
     text::Text,
 };
 use pager_core::Pager;
+mod standby;
+pub use standby::{Action, ConnectionStatus, Screen, Ui};
 
 pub const WIDTH: u32 = 480;
 pub const HEIGHT: u32 = 320;
@@ -34,7 +36,7 @@ fn label<D: DrawTarget<Color = Rgb565>>(
     Ok(())
 }
 
-pub fn render<D: DrawTarget<Color = Rgb565>>(
+pub fn render_demo<D: DrawTarget<Color = Rgb565>>(
     display: &mut D,
     pager: &Pager,
 ) -> Result<(), D::Error> {
@@ -108,7 +110,7 @@ pub fn render<D: DrawTarget<Color = Rgb565>>(
     }
     label(
         display,
-        "Left/Right: browse  A: ACK all  S: quiet  C: back  M: mode",
+        "Left/Right: browse  A: ACK all  S: muted  C: back  M: mode",
         10,
         310,
         Rgb565::WHITE,

@@ -5,7 +5,7 @@ pub const QUEUE_LIMIT: usize = 128;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
     Armed,
-    Quiet,
+    Muted,
     Disarmed,
 }
 
@@ -141,10 +141,10 @@ mod tests {
         assert!(!p.sounding());
     }
     #[test]
-    fn quiet_and_rearm_do_not_replay_old_alarms() {
+    fn muted_and_rearm_do_not_replay_old_alarms() {
         let mut p = Pager::default();
         p.detect(0, 0);
-        p.set_mode(Mode::Quiet);
+        p.set_mode(Mode::Muted);
         p.detect(1, 1);
         assert!(!p.sounding());
         assert_eq!(p.alarms.len(), 2);
@@ -205,13 +205,13 @@ mod tests {
     }
 
     #[test]
-    fn ack_does_not_change_quiet_mode_or_reenable_audio() {
+    fn ack_does_not_change_muted_mode_or_reenable_audio() {
         let mut p = Pager::default();
-        p.set_mode(Mode::Quiet);
+        p.set_mode(Mode::Muted);
         p.detect(0, 0);
         p.acknowledge_all();
         p.detect(1, 10);
-        assert_eq!(p.mode, Mode::Quiet);
+        assert_eq!(p.mode, Mode::Muted);
         assert!(!p.sounding());
         assert!(p.alarms[0].acknowledged);
         assert!(!p.alarms[1].acknowledged);

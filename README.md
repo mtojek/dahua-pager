@@ -3,7 +3,8 @@
 Alarm pager for Dahua NVRs, written in Rust. macOS first, ESP32-S3 later.
 
 The NVR client supports Digest authentication, camera discovery, snapshots and
-reconnecting event streams. The desktop UI currently uses simulated alarms.
+reconnecting event streams. The desktop UI has a standby screen with live NVR
+connection status. Real detection/snapshot handling in the UI comes next.
 
 ## Run
 
@@ -11,9 +12,14 @@ reconnecting event streams. The desktop UI currently uses simulated alarms.
 cargo run -p pager-macos
 ```
 
-Keys: **1–6** trigger alarms, **←/→** browse, **A** acknowledges all received
-alarms, **S** sets QUIET, **C** dismisses an acknowledged alarm,
-**M** changes mode, **Esc** exits. Alarms play through CoreAudio for up to five minutes.
+Click the physical buttons, or use **Tab/arrows + Enter**. Red/**S** sleeps the
+LCD; blue/**M** cycles ARMED → MUTED → DISARMED. Any button/key wakes the LCD
+without also acting. **H** opens History, **T** opens Settings, **Backspace**
+returns, **Esc** exits when awake. History and Settings are placeholders for the next views.
+
+The earlier synthetic alarm demo is available with `cargo run -p pager-macos -- --demo`.
+In the demo: **1–6** trigger alarms, **←/→** browse, **A** acknowledges all,
+**S** sets MUTED, **C** dismisses an acknowledged alarm, **M** changes mode.
 
 ## Connect to an NVR
 

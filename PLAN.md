@@ -11,7 +11,7 @@ The device connects to the NVR, receives detection events, checks whether detect
 - Target: ESP32-S3 handheld from `crd-esp32`; use that repository as the authoritative pinout and peripheral reference, rather than assuming a generic ESP32 board.
 - Display: ILI9488, **480 × 320**, landscape, SPI.
 - Touch: XPT2046.
-- Inputs: four physical buttons, joystick, touchscreen. **Two buttons below the screen = PREV / NEXT; two buttons on the right perform contextual actions such as ACK / BACK and Disarm / Quiet.** Confirm exact GPIO-to-position mapping against the hardware before implementation.
+- Inputs: four physical buttons, joystick, touchscreen. **Two buttons below the screen = PREV / NEXT; two buttons on the right perform contextual actions such as ACK / BACK and Sleep / Mode.** Confirm exact GPIO-to-position mapping against the hardware before implementation.
 - Sound: MAX98357A I2S amplifier and speaker; audible alarm pattern.
 - Storage: microSD card on the device; regular local files on macOS.
 - Wi-Fi: ESP32-S3 wireless networking.
@@ -25,18 +25,18 @@ Three **global** modes, distinct from individual event lifecycle states:
 | Mode | Process incoming events | Record new events/snapshots | Sound new alarms |
 | --- | --- | --- | --- |
 | `ARMED` | Yes | Yes | Yes |
-| `QUIET` | Yes | Yes | No |
+| `MUTED` | Yes | Yes | No |
 | `DISARMED` | No | No | No |
 
-- `Quiet` immediately stops current audio and switches `ARMED → QUIET`. New events in `QUIET` still appear in the queue and history but never restart the siren.
+- Selecting `MUTED` immediately stops current audio. New events in `MUTED` still appear in the queue and history but never restart the siren.
 - `DISARMED` stops current audio and ignores new detections without creating new records. Existing alarms and history remain available. The connection may remain open, and lifecycle messages may finish existing records without creating new alarms.
 - Switching back to `ARMED` enables sound for **future** new alarms, not historical events.
 - **Accepted audio behavior:** use a loud, repeating pager pattern intended to wake the user at night (initial pattern: three beeps followed by a two-second pause). Provide configurable volume and a sound-test action; validate the pattern and loudness on real hardware.
 - Audio runs in a global episode lasting at most **5 minutes**, measured from its first qualifying alarm. New alarms received during playback join that episode without restarting or extending its deadline. NVR Stop messages do not silence it. At timeout, retire all sound requests from that episode and keep mode `ARMED`; a distinct new alarm may start a new episode. Existing queue entries do not restart audio.
-- **ACK acknowledges all alarms received up to the moment of the action**, regardless of camera or selected entry, and immediately stops all current audio. Keep those records and snapshots available; do not delete them. ACK does not change the global mode. A distinct later detection can ring again in `ARMED`, but stays silent in `QUIET`.
+- **ACK acknowledges all alarms received up to the moment of the action**, regardless of camera or selected entry, and immediately stops all current audio. Keep those records and snapshots available; do not delete them. ACK does not change the global mode. A distinct later detection can ring again in `ARMED`, but stays silent in `MUTED`.
 - After ACK, the alarm screen action changes to `Back`; keep the displayed snapshot until the user leaves. Returning from the screen never deletes history. NVR Stop does not acknowledge an alarm or stop its audio. Navigation does not acknowledge alarms.
 - `ALARM` is a screen/attention state, not a fourth global mode. Keep mode, acknowledgement and detection lifecycle separate.
-- Schedule controls `ARMED`, `QUIET` and `DISARMED`. Scheduled arming or manual rearming enables sound only for future alarms.
+- Schedule controls `ARMED`, `MUTED` and `DISARMED`. Scheduled arming or manual rearming enables sound only for future alarms.
 
 ## 4. NVR event ingestion
 
@@ -80,31 +80,32 @@ Three **global** modes, distinct from individual event lifecycle states:
 
 Screen sketches and interaction rules: [docs/ui](docs/ui/README.md).
 
-Use **`embedded-graphics`** as the shared drawing abstraction, with platform-specific display adapters. Target **480 × 320 physical pixels** on both platforms. The macOS window may scale by an integer factor but must retain the same logical resolution and touch mapping.
+Use **`embedded-graphics`** as the shared drawing abstraction, with platform-specific display adapters. Target **480 × 320 physical pixels** on both platforms. The macOS simulator uses **scale 1:1**, with an additional case area outside the LCD for the physical controls.
 
 ### Accepted screens
 
 | Screen | Header | Main area | Actions |
 | --- | --- | --- | --- |
-| Standby | Mode, connection status, time | Empty while waiting | Right: Disarm/Arm and Quiet; bottom: History and Settings |
+| Standby | Mode, connection status, time | Empty while waiting | Right: red Sleep and blue Mode (ARMED → MUTED → DISARMED → ARMED); bottom: History and Settings |
 | History | Mode, History, time | One snapshot with detection rectangle | Right: Back; bottom: when/what, Prev/Next and entry count. **No Clear or manual delete action.** |
 | Alarm | ALARM, connection status, time | Snapshot with detection rectangle | Right: ACK, replaced by Back after acknowledgement; bottom: when/what. Browse overlapping alarms with Prev/Next. ACK always covers all received alarms. |
 | Settings | Mode, Settings, time | Ustawienia obszaru; Harmonogram; audio volume/test and diagnostics | Back |
 | Area camera list | Mode, Ustawienia obszaru, time | Camera names/indices discovered from NVR | Select camera; Back |
 | Area editor | Mode, selected camera, time | Snapshot with 32 × 20 selected-cell grid and magnification | Save / Back |
-| Schedule | Mode, Harmonogram, time | Weekly periods assigning ARMED, QUIET or DISARMED | Enable/disable schedule; edit periods; Save / Back |
+| Schedule | Mode, Harmonogram, time | Weekly periods assigning ARMED, MUTED or DISARMED | Enable/disable schedule; edit periods; Save / Back |
 
-Reserve a 24-pixel header, a right action column and a bottom metadata/navigation row. Refine exact pixel widths with the first rendered layouts. Fit snapshots with their aspect ratio preserved; do not crop the area editor. Main-screen emptiness is intentional, not a camera-preview placeholder.
+Reserve a 24-pixel header and a bottom metadata row where needed. Physical action buttons and their captions sit outside the LCD: bottom-right green History then yellow Settings side by side; right red Sleep above blue Mode on Standby. The desktop-only case is 624 × 432 logical pixels around an inset 480 × 320 LCD. The header uses red for ARMED, amber for MUTED and green for DISARMED, with white bold mode text and no badge. NVR connection state affects only the status text; connecting does not turn the header blue. Refine exact pixel widths with the first rendered layouts. Fit snapshots with their aspect ratio preserved; do not crop the area editor. Main-screen emptiness is intentional, not a camera-preview placeholder.
 
-- Physical bottom buttons perform Prev/Next. Right-side buttons map to the current screen's labelled actions; verify physical GPIO positions later. Do not draw four fake hardware buttons below the LCD.
+- Physical bottom buttons perform Prev/Next. Right-side buttons map to the current screen's labelled actions; verify physical GPIO positions later. Draw the four circular physical controls only in the desktop case, never inside the shared LCD renderer.
 - macOS keyboard/mouse simulates physical inputs and touch; joystick provides contextual navigation.
-- Quiet is a persistent mode change; ACK is confirmation of existing alarms only. Display the current mode and manual/schedule source clearly.
+- MUTED is a persistent mode change; ACK is confirmation of existing alarms only. Display the current mode and manual/schedule source clearly.
 - History has no Clear action. Only the configured automatic retention policy removes old eligible records.
-- The current demo keyboard supports A = ACK all, S = QUIET, C = leave an acknowledged entry and M = cycle modes. The accepted multi-screen layout and schedule editor are planned, not yet implemented.
+- On Standby the red button sleeps the LCD only; it does not disarm, mute, stop audio or disconnect NVR. Any physical button wakes it and consumes that first action. The blue button cycles ARMED → MUTED → DISARMED → ARMED. Sleeping state is independent of mode and acknowledgement.
+- Standby is implemented on macOS with the shared renderer, live connection status, system time, click/keyboard input and sleep/mode controls. History and Settings currently open placeholder screens. Real detection/snapshot integration and the other full views remain planned. The older synthetic alarm workflow is available only with `--demo`.
 
 ## 8. Scheduling and clock
 
-- One **global** weekly schedule shared by all cameras. Each period selects days, start/end time and one mode: `ARMED`, `QUIET` or `DISARMED`. Expose this under Settings → Harmonogram. The schedule automatically applies the selected mode when that period begins.
+- One **global** weekly schedule shared by all cameras. Each period selects days, start/end time and one mode: `ARMED`, `MUTED` or `DISARMED`. Expose this under Settings → Harmonogram. The schedule automatically applies the selected mode when that period begins.
 - Proposed simple schedule behavior: expose one enable/disable switch and weekly windows. With the schedule disabled, mode changes are manual. With it enabled, a manual mode lasts until the next actual scheduled mode transition. Merge adjacent/overlapping periods only when their modes match; reject overlaps assigning different modes. Define an explicit fallback mode for gaps before implementing the editor. Show the mode source and next transition in the UI. No selectable precedence policies in the initial version.
 - Synchronize ESP32 time via NTP/SNTP (default `pool.ntp.org`, configurable). Use `Europe/Warsaw` as the default display timezone and handle DST correctly.
 - Persist known timestamps in UTC and render local time in the UI. Use NVR `UTC` as a provisional clock source when internet/NTP is unavailable, recording the source and trust level. Verify freshness and field semantics in integration; the supplied sample has advancing `UTC` while `RealUTC` remains constant between Start and Stop. Do not assume those fields are interchangeable.
@@ -157,7 +158,7 @@ tests/
 - Parser tests using captured/redacted Dahua event fixtures and malformed/chunked HTTP streams.
 - Integration tests with mock Dahua event stream and snapshot endpoint: concurrent alarms across cameras, reconnects, event repeats, absent stop messages, missing snapshots, and auth/network failures.
 - E2E on macOS: launch simulated device + mock NVR; inject touch/button actions; assert UI state, sound state, records, and snapshots. Use deterministic fake time for 5-minute timeout and schedule transitions.
-- Test `ARMED`, `QUIET`, and `DISARMED` separately, including a second camera alarming after the first is quiet.
+- Test `ARMED`, `MUTED`, and `DISARMED` separately, including a second camera alarming after the first is muted.
 - Storage fault tests: full SD, missing card, interrupted write, corrupt config/history, rotation while active alarms exist.
 - Hardware smoke tests: display, touch calibration, all four physical buttons, joystick, I2S, SD, Wi-Fi, NTP, and real NVR.
 - CI runs formatting, linting, core tests, parser/integration tests, and macOS simulator/E2E where runners permit; ESP32 cross-build and hardware checks separately.
@@ -197,8 +198,8 @@ Work proceeds on macOS first; ESP32 discovery and porting do not block the deskt
 - All six cameras can be configured; their events are processed in arrival order.
 - A detected person/vehicle in enabled cells generates an alarm and history record when monitoring and storage are available, with one snapshot request at detection start. Snapshot failure is recorded without suppressing the alarm; storage failure is visible and does not suppress sound/UI alarms.
 - Independent camera alarms remain browsable while only one is shown at a time.
-- `QUIET` stops sound globally without stopping event recording; `DISARMED` stops new event recording.
+- `MUTED` stops sound globally without stopping event recording; `DISARMED` stops new event recording.
 - Alarm entries remain visible through ACK until Back. ACK confirms all alarms received so far, stops their sound and retains history; no manual Clear action is exposed.
-- Repeating pager audio stops within 5 minutes of the global audio episode start; concurrent detections never extend that deadline. ACK stops audio for all alarms received so far without changing mode, QUIET suppresses future audio, and a distinct new alarm after timeout can sound again in ARMED mode.
-- Weekly ARMED/QUIET/DISARMED schedule, NTP clock, pretty JSON configuration, SD storage, and automatic history rotation work.
+- Repeating pager audio stops within 5 minutes of the global audio episode start; concurrent detections never extend that deadline. ACK stops audio for all alarms received so far without changing mode, MUTED suppresses future audio, and a distinct new alarm after timeout can sound again in ARMED mode.
+- Weekly ARMED/MUTED/DISARMED schedule, NTP clock, pretty JSON configuration, SD storage, and automatic history rotation work.
 - Automated unit, integration, and mock-NVR E2E tests cover normal and failure paths.
