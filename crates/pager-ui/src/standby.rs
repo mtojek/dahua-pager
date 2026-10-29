@@ -10,6 +10,11 @@ use embedded_graphics::{
 };
 use pager_core::{Mode, Pager};
 
+pub const AREA_COLUMNS: usize = 32;
+pub const AREA_ROWS: usize = 20;
+pub const AREA_IMAGE_WIDTH: u32 = 448;
+pub const AREA_IMAGE_HEIGHT: u32 = 252;
+
 const BACKGROUND: Rgb565 = Rgb565::new(1, 3, 2);
 const BORDER: Rgb565 = Rgb565::new(4, 8, 5);
 const SECONDARY: Rgb565 = Rgb565::new(18, 38, 19);
@@ -20,6 +25,8 @@ pub enum Screen {
     Standby,
     History,
     Settings,
+    AreaCameras,
+    AreaEditor,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Action {
@@ -29,6 +36,9 @@ pub enum Action {
     Settings,
     Back,
     Wake,
+    OpenAreas,
+    SelectAreaCamera,
+    SaveAreas,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ConnectionStatus {
@@ -61,11 +71,49 @@ const MAIN_ACTIONS: [Action; 4] = [
     Action::Settings,
 ];
 const BACK_ACTIONS: [Action; 1] = [Action::Back];
+const EDITOR_ACTIONS: [Action; 2] = [Action::Back, Action::SaveAreas];
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AreaCamera {
+    pub index: u32,
+    pub name: String,
+    pub address: Option<String>,
+    pub mask: [[bool; AREA_COLUMNS]; AREA_ROWS],
+    pub image: Option<Vec<Rgb565>>,
+    pub snapshot_loading: bool,
+    pub snapshot_error: bool,
+}
+
+impl AreaCamera {
+    pub fn new(index: u32, name: impl Into<String>) -> Self {
+        Self {
+            index,
+            name: name.into(),
+            address: None,
+            mask: [[false; AREA_COLUMNS]; AREA_ROWS],
+            image: None,
+            snapshot_loading: false,
+            snapshot_error: false,
+        }
+    }
+
+    pub fn with_address(mut self, address: impl Into<String>) -> Self {
+        self.address = Some(address.into());
+        self
+    }
+}
 
 pub struct Ui {
     pub screen: Screen,
     focus: Option<Action>,
     asleep: bool,
+    cameras: Vec<AreaCamera>,
+    selected_camera: usize,
+    camera_loading: bool,
+    camera_load_error: bool,
+    save_error: bool,
+    area_paint_value: Option<bool>,
+    last_painted_cell: Option<(usize, usize)>,
 }
 impl Default for Ui {
     fn default() -> Self {
@@ -73,6 +121,20 @@ impl Default for Ui {
             screen: Screen::Standby,
             focus: None,
             asleep: false,
+            cameras: vec![
+                AreaCamera::new(1, "Backyard 1"),
+                AreaCamera::new(2, "Backyard 2"),
+                AreaCamera::new(3, "Garage"),
+                AreaCamera::new(4, "Pool"),
+                AreaCamera::new(5, "Driveway"),
+                AreaCamera::new(6, "Entrance"),
+            ],
+            selected_camera: 0,
+            camera_loading: false,
+            camera_load_error: false,
+            save_error: false,
+            area_paint_value: None,
+            last_painted_cell: None,
         }
     }
 }
@@ -87,6 +149,8 @@ impl Ui {
     fn actions(&self) -> &'static [Action] {
         if self.screen == Screen::Standby {
             &MAIN_ACTIONS
+        } else if self.screen == Screen::AreaEditor {
+            &EDITOR_ACTIONS
         } else {
             &BACK_ACTIONS
         }
@@ -140,11 +204,165 @@ impl Ui {
                 self.screen = Screen::Settings;
                 self.focus = None;
             }
+            Action::OpenAreas => {
+                self.screen = Screen::AreaCameras;
+                self.focus = None;
+            }
+            Action::SelectAreaCamera => {
+                if let Some(camera) = self.cameras.get_mut(self.selected_camera) {
+                    camera.snapshot_loading = true;
+                    camera.snapshot_error = false;
+                    camera.image = None;
+                }
+                self.screen = Screen::AreaEditor;
+                self.focus = None;
+            }
+            Action::SaveAreas => {}
             Action::Back => {
-                self.screen = Screen::Standby;
+                self.screen = match self.screen {
+                    Screen::AreaEditor => Screen::AreaCameras,
+                    Screen::AreaCameras => Screen::Settings,
+                    _ => Screen::Standby,
+                };
                 self.focus = None;
             }
             Action::Wake => {}
+        }
+    }
+
+    pub fn cameras(&self) -> &[AreaCamera] {
+        &self.cameras
+    }
+
+    pub fn set_cameras(&mut self, cameras: Vec<AreaCamera>) {
+        self.cameras = cameras;
+        self.camera_loading = false;
+        self.camera_load_error = false;
+        if self.cameras.is_empty() {
+            self.selected_camera = 0;
+        } else {
+            self.selected_camera = self.selected_camera.min(self.cameras.len() - 1);
+        }
+    }
+
+    pub fn begin_camera_refresh(&mut self) {
+        self.cameras.clear();
+        self.camera_loading = true;
+        self.camera_load_error = false;
+    }
+
+    pub fn fail_camera_refresh(&mut self) {
+        self.cameras.clear();
+        self.camera_loading = false;
+        self.camera_load_error = true;
+    }
+
+    pub fn selected_camera(&self) -> usize {
+        self.selected_camera
+    }
+
+    pub fn set_camera_image(&mut self, index: u32, image: Option<Vec<Rgb565>>) {
+        if let Some(camera) = self.cameras.iter_mut().find(|camera| camera.index == index) {
+            camera.snapshot_loading = false;
+            camera.snapshot_error = image.is_none();
+            camera.image = image;
+        }
+    }
+
+    pub fn save_completed(&mut self) {
+        self.screen = Screen::AreaCameras;
+        self.focus = None;
+        self.save_error = false;
+    }
+
+    pub fn save_failed(&mut self) {
+        self.save_error = true;
+    }
+
+    pub fn begin_area_paint(&mut self, point: Point) {
+        self.area_paint_value = None;
+        self.last_painted_cell = None;
+        let Some((row, col)) = self.area_cell_at(point) else {
+            return;
+        };
+        self.area_paint_value = Some(!self.cameras[self.selected_camera].mask[row][col]);
+        self.paint_area_cell(row, col);
+    }
+
+    pub fn continue_area_paint(&mut self, point: Point) {
+        let Some((row, col)) = self.area_cell_at(point) else {
+            return;
+        };
+        self.paint_area_cell(row, col);
+    }
+
+    pub fn end_area_paint(&mut self) {
+        self.area_paint_value = None;
+        self.last_painted_cell = None;
+    }
+
+    fn area_cell_at(&self, point: Point) -> Option<(usize, usize)> {
+        if self.screen != Screen::AreaEditor {
+            return None;
+        }
+        const LEFT: i32 = 16;
+        const TOP: i32 = 34;
+        let col = (point.x - LEFT) * AREA_COLUMNS as i32 / AREA_IMAGE_WIDTH as i32;
+        let row = (point.y - TOP) * AREA_ROWS as i32 / AREA_IMAGE_HEIGHT as i32;
+        ((0..AREA_COLUMNS as i32).contains(&col) && (0..AREA_ROWS as i32).contains(&row))
+            .then_some((row as usize, col as usize))
+    }
+
+    fn paint_area_cell(&mut self, row: usize, col: usize) {
+        let Some(value) = self.area_paint_value else {
+            return;
+        };
+        let (start_row, start_col) = self.last_painted_cell.unwrap_or((row, col));
+        let row_delta = row as isize - start_row as isize;
+        let col_delta = col as isize - start_col as isize;
+        let steps = row_delta.unsigned_abs().max(col_delta.unsigned_abs());
+        for step in 0..=steps {
+            let row =
+                (start_row as isize + row_delta * step as isize / steps.max(1) as isize) as usize;
+            let col =
+                (start_col as isize + col_delta * step as isize / steps.max(1) as isize) as usize;
+            self.cameras[self.selected_camera].mask[row][col] = value;
+        }
+        self.last_painted_cell = Some((row, col));
+    }
+
+    /// Handles a click in the 480×320 LCD coordinate space.
+    pub fn lcd_click(&mut self, point: Point, pager: &mut Pager) -> bool {
+        if self.asleep {
+            return false;
+        }
+        match self.screen {
+            Screen::Settings if (44..=93).contains(&point.y) => {
+                let _ = pager;
+                self.screen = Screen::AreaCameras;
+                self.focus = None;
+                true
+            }
+            Screen::AreaCameras if (34..256).contains(&point.y) && point.x >= 12 => {
+                let row = ((point.y - 34) / 37) as usize;
+                if row < self.cameras.len() {
+                    self.selected_camera = row;
+                    self.cameras[row].snapshot_loading = true;
+                    self.cameras[row].snapshot_error = false;
+                    self.cameras[row].image = None;
+                    let _ = pager;
+                    self.screen = Screen::AreaEditor;
+                    self.focus = None;
+                    return true;
+                }
+                false
+            }
+            Screen::AreaEditor => self.area_cell_at(point).is_some_and(|(row, col)| {
+                self.cameras[self.selected_camera].mask[row][col] =
+                    !self.cameras[self.selected_camera].mask[row][col];
+                true
+            }),
+            _ => false,
         }
     }
     pub fn render<D: DrawTarget<Color = Rgb565>>(
@@ -198,10 +416,12 @@ impl Ui {
             .draw(display)?;
         } else {
             Text::with_alignment(
-                if self.screen == Screen::History {
-                    "HISTORY"
-                } else {
-                    "SETTINGS"
+                match self.screen {
+                    Screen::History => "HISTORY",
+                    Screen::Settings => "SETTINGS",
+                    Screen::AreaCameras => "AREA SETTINGS",
+                    Screen::AreaEditor => self.cameras[self.selected_camera].name.as_str(),
+                    Screen::Standby => unreachable!(),
                 },
                 Point::new(240, 16),
                 MonoTextStyle::new(&FONT_6X10, Rgb565::WHITE),
@@ -210,6 +430,14 @@ impl Ui {
             .draw(display)?;
             if self.screen == Screen::Settings {
                 render_settings(display)?;
+            } else if self.screen == Screen::AreaCameras {
+                render_area_cameras(display, self)?;
+            } else if self.screen == Screen::AreaEditor {
+                render_area_editor(
+                    display,
+                    &self.cameras[self.selected_camera],
+                    self.save_error,
+                )?;
             } else {
                 text(
                     display,
@@ -231,18 +459,149 @@ impl Ui {
             Action::Settings => "Settings",
             Action::Back => "Back",
             Action::Wake => "Wake",
+            Action::OpenAreas | Action::SelectAreaCamera => "Select",
+            Action::SaveAreas => "Save",
         }
     }
 }
 
+fn render_area_cameras<D: DrawTarget<Color = Rgb565>>(
+    display: &mut D,
+    ui: &Ui,
+) -> Result<(), D::Error> {
+    if ui.camera_loading {
+        return text(
+            display,
+            "Loading cameras...",
+            Point::new(240, 160),
+            Alignment::Center,
+            SECONDARY,
+        );
+    }
+    if ui.camera_load_error {
+        return text(
+            display,
+            "Camera refresh failed",
+            Point::new(240, 160),
+            Alignment::Center,
+            SECONDARY,
+        );
+    }
+    if ui.cameras.is_empty() {
+        return text(
+            display,
+            "No enabled cameras found",
+            Point::new(240, 160),
+            Alignment::Center,
+            SECONDARY,
+        );
+    }
+    for (i, camera) in ui.cameras.iter().enumerate() {
+        let top = 34 + i as i32 * 37;
+        text(
+            display,
+            &camera.name,
+            Point::new(18, top + 18),
+            Alignment::Left,
+            PRIMARY,
+        )?;
+        let details = camera
+            .address
+            .as_deref()
+            .map(|address| format!("IP {address}"))
+            .unwrap_or_default();
+        Text::new(
+            &details,
+            Point::new(18, top + 31),
+            MonoTextStyle::new(&FONT_6X10, SECONDARY),
+        )
+        .draw(display)?;
+        if i < ui.cameras.len() - 1 {
+            Rectangle::new(Point::new(16, top + 35), Size::new(448, 1))
+                .into_styled(PrimitiveStyle::with_fill(BORDER))
+                .draw(display)?;
+        }
+    }
+    Ok(())
+}
+
+fn render_area_editor<D: DrawTarget<Color = Rgb565>>(
+    display: &mut D,
+    camera: &AreaCamera,
+    save_error: bool,
+) -> Result<(), D::Error> {
+    const LEFT: i32 = 16;
+    const TOP: i32 = 34;
+    if let Some(image) = camera.image.as_ref() {
+        for y in 0..AREA_IMAGE_HEIGHT as usize {
+            for x in 0..AREA_IMAGE_WIDTH as usize {
+                let row = y * AREA_ROWS / AREA_IMAGE_HEIGHT as usize;
+                let col = x * AREA_COLUMNS / AREA_IMAGE_WIDTH as usize;
+                let source = image[y * AREA_IMAGE_WIDTH as usize + x];
+                let color = if camera.mask[row][col] {
+                    Rgb565::new(
+                        ((source.r() as u16 * 55 + 31 * 45) / 100) as u8,
+                        ((source.g() as u16 * 55) / 100) as u8,
+                        ((source.b() as u16 * 55) / 100) as u8,
+                    )
+                } else {
+                    source
+                };
+                Pixel(Point::new(LEFT + x as i32, TOP + y as i32), color).draw(display)?;
+            }
+        }
+        for col in 1..AREA_COLUMNS {
+            let x = LEFT + col as i32 * AREA_IMAGE_WIDTH as i32 / AREA_COLUMNS as i32;
+            Rectangle::new(Point::new(x, TOP), Size::new(1, AREA_IMAGE_HEIGHT))
+                .into_styled(PrimitiveStyle::with_fill(Rgb565::new(16, 32, 16)))
+                .draw(display)?;
+        }
+        for row in 1..AREA_ROWS {
+            let y = TOP + row as i32 * AREA_IMAGE_HEIGHT as i32 / AREA_ROWS as i32;
+            Rectangle::new(Point::new(LEFT, y), Size::new(AREA_IMAGE_WIDTH, 1))
+                .into_styled(PrimitiveStyle::with_fill(Rgb565::new(16, 32, 16)))
+                .draw(display)?;
+        }
+    } else {
+        let message = if camera.snapshot_loading {
+            "Loading snapshot..."
+        } else if camera.snapshot_error {
+            "Snapshot unavailable"
+        } else {
+            "No snapshot"
+        };
+        text(
+            display,
+            message,
+            Point::new(240, 158),
+            Alignment::Center,
+            SECONDARY,
+        )?;
+    }
+    text(
+        display,
+        if save_error {
+            "Save failed"
+        } else {
+            "Click cells to mark area"
+        },
+        Point::new(16, 300),
+        Alignment::Left,
+        if save_error {
+            Rgb565::new(31, 8, 5)
+        } else {
+            SECONDARY
+        },
+    )?;
+    Ok(())
+}
+
 fn render_settings<D: DrawTarget<Color = Rgb565>>(display: &mut D) -> Result<(), D::Error> {
     let rows = [
-        ("Ustawienia obszaru", "Obszary detekcji dla każdej kamery"),
-        ("Harmonogram", "Tryby pracy według dni i godzin"),
-        ("Dźwięk", "Głośność i test alarmu"),
-        ("Diagnostyka", "Połączenie, czas i pamięć"),
+        ("Area Settings", "Detection areas for each camera", true),
+        ("Schedule", "Operating modes by day and time", false),
     ];
-    for (i, (title, description)) in rows.iter().enumerate() {
+    for (i, (title, description, available)) in rows.iter().enumerate() {
         let top = 44 + i as i32 * 58;
         text(
             display,
@@ -259,13 +618,15 @@ fn render_settings<D: DrawTarget<Color = Rgb565>>(display: &mut D) -> Result<(),
         .draw(display)?;
         // These sections are not implemented; do not draw active chevrons or
         // a selected row that would imply they can already be opened.
-        Text::with_alignment(
-            "WKRÓTCE",
-            Point::new(464, top + 12),
-            MonoTextStyle::new(&FONT_6X10, SECONDARY),
-            Alignment::Right,
-        )
-        .draw(display)?;
+        if !available {
+            Text::with_alignment(
+                "COMING SOON",
+                Point::new(464, top + 12),
+                MonoTextStyle::new(&FONT_6X10, SECONDARY),
+                Alignment::Right,
+            )
+            .draw(display)?;
+        }
         if i < rows.len() - 1 {
             Rectangle::new(Point::new(16, top + 49), Size::new(448, 1))
                 .into_styled(PrimitiveStyle::with_fill(BORDER))
@@ -402,5 +763,75 @@ mod tests {
             assert_eq!(pager.sounding(), sounding);
             assert_eq!(ui.screen, Screen::Standby);
         }
+    }
+
+    #[test]
+    fn area_settings_opens_camera_list_and_clicks_toggle_grid_cells() {
+        let mut ui = Ui::default();
+        let mut pager = Pager::default();
+        ui.screen = Screen::Settings;
+        assert!(ui.lcd_click(Point::new(20, 50), &mut pager));
+        assert_eq!(ui.screen, Screen::AreaCameras);
+        assert!(ui.lcd_click(Point::new(20, 50), &mut pager));
+        assert_eq!(ui.screen, Screen::AreaEditor);
+        assert!(!ui.cameras()[0].mask[0][0]);
+        assert!(ui.lcd_click(Point::new(16, 44), &mut pager));
+        assert!(ui.cameras()[0].mask[0][0]);
+        assert!(ui.lcd_click(Point::new(16, 44), &mut pager));
+        assert!(!ui.cameras()[0].mask[0][0]);
+    }
+
+    #[test]
+    fn selecting_camera_shows_loading_until_snapshot_is_set() {
+        let mut ui = Ui::default();
+        let mut pager = Pager::default();
+        ui.set_cameras(vec![AreaCamera::new(2, "Garage")]);
+        ui.screen = Screen::AreaCameras;
+        assert!(ui.lcd_click(Point::new(20, 50), &mut pager));
+        assert!(ui.cameras()[0].snapshot_loading);
+        assert!(!ui.cameras()[0].snapshot_error);
+
+        ui.set_camera_image(
+            2,
+            Some(vec![
+                Rgb565::WHITE;
+                (AREA_IMAGE_WIDTH * AREA_IMAGE_HEIGHT) as usize
+            ]),
+        );
+        assert!(!ui.cameras()[0].snapshot_loading);
+        assert!(!ui.cameras()[0].snapshot_error);
+        assert!(ui.cameras()[0].image.is_some());
+    }
+
+    #[test]
+    fn failed_snapshot_does_not_leave_loading_state() {
+        let mut ui = Ui::default();
+        let mut pager = Pager::default();
+        ui.set_cameras(vec![AreaCamera::new(1, "Backyard")]);
+        ui.screen = Screen::AreaCameras;
+        ui.lcd_click(Point::new(20, 50), &mut pager);
+        ui.set_camera_image(1, None);
+        assert!(!ui.cameras()[0].snapshot_loading);
+        assert!(ui.cameras()[0].snapshot_error);
+    }
+
+    #[test]
+    fn area_drag_paints_one_consistent_state_across_cells() {
+        let mut ui = Ui::default();
+        ui.set_cameras(vec![AreaCamera::new(1, "Backyard")]);
+        ui.screen = Screen::AreaEditor;
+
+        ui.begin_area_paint(Point::new(17, 35));
+        ui.continue_area_paint(Point::new(31, 35));
+        ui.continue_area_paint(Point::new(31, 35));
+        assert!(ui.cameras()[0].mask[0][0]);
+        assert!(ui.cameras()[0].mask[0][1]);
+        ui.end_area_paint();
+
+        ui.begin_area_paint(Point::new(17, 35));
+        ui.continue_area_paint(Point::new(31, 35));
+        assert!(!ui.cameras()[0].mask[0][0]);
+        assert!(!ui.cameras()[0].mask[0][1]);
+        ui.end_area_paint();
     }
 }

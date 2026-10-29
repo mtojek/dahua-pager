@@ -8,5 +8,6 @@
     "connect_timeout_secs": 5,
     "session_timeout_secs": 60,
     "tls_insecure": false
-  }
+  },
+  "cameras": []
 }

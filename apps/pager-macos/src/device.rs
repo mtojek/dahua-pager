@@ -36,6 +36,8 @@ fn actions(ui: &Ui) -> [Option<Action>; 4] {
             Some(Action::Sleep),
             Some(Action::CycleMode),
         ]
+    } else if ui.screen == Screen::AreaEditor {
+        [None, None, Some(Action::Back), Some(Action::SaveAreas)]
     } else {
         [None, None, Some(Action::Back), None]
     }

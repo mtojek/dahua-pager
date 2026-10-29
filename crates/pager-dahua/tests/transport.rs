@@ -166,16 +166,26 @@ fn authentication_failure_is_bounded_and_redacted() {
 fn discovered_camera_drives_snapshot_without_camera_configuration() {
     let (url, handle) = server(|listener| {
         let mut titles = accept(&listener);
-        assert!(request(&mut titles).starts_with(
-            "GET /cgi-bin/configManager.cgi?action=getConfig&name=ChannelTitle HTTP/1.1"
-        ));
+        assert!(
+            request(&mut titles)
+                .starts_with("GET /cgi-bin/LogicDeviceManager.cgi?action=getCameraAll HTTP/1.1")
+        );
         response(
             &mut titles,
             "200 OK",
             "Content-Type: text/plain\r\n",
-            b"table.ChannelTitle[1].Name=Backyard 2\r\n",
+            b"camera[0].UniqueChannel=1\r\ncamera[0].Enable=true\r\ncamera[0].Name=Backyard 2\r\ncamera[0].DeviceInfo.Enable=true\r\ncamera[0].DeviceInfo.Address=192.0.2.2\r\n",
         );
         drop(titles);
+        let mut channel_titles = accept(&listener);
+        request(&mut channel_titles);
+        response(
+            &mut channel_titles,
+            "200 OK",
+            "Content-Type: text/plain\r\n",
+            b"table.ChannelTitle[1].Name=Driveway\r\n",
+        );
+        drop(channel_titles);
         let mut stream = accept(&listener);
         let req = request(&mut stream);
         assert!(req.starts_with("GET /cgi-bin/snapshot.cgi?channel=2 HTTP/1.1"));
@@ -192,6 +202,7 @@ fn discovered_camera_drives_snapshot_without_camera_configuration() {
     let client = DahuaClient::new(cfg).unwrap();
     let camera = client.cameras().unwrap().pop().unwrap();
     assert_eq!(camera.event_index().unwrap(), 1);
+    assert_eq!(camera.address, "192.0.2.2");
     assert_eq!(
         client.snapshot(camera.index).unwrap(),
         [0xff, 0xd8, 0xff, 0xd9]
@@ -369,15 +380,24 @@ fn connection_config_does_not_require_cameras_and_rejects_invalid_base_urls() {
 use rustls::pki_types::pem::PemObject;
 
 #[test]
-fn channel_title_api_returns_one_based_camera_indices_and_names() {
+fn camera_list_api_returns_enabled_one_based_cameras_with_addresses() {
     let (url, handle) = server(|listener| {
         let mut stream = accept(&listener);
         let req = request(&mut stream);
-        assert!(req.starts_with(
-            "GET /cgi-bin/configManager.cgi?action=getConfig&name=ChannelTitle HTTP/1.1"
-        ));
+        assert!(
+            req.starts_with("GET /cgi-bin/LogicDeviceManager.cgi?action=getCameraAll HTTP/1.1")
+        );
         response(
             &mut stream,
+            "200 OK",
+            "Content-Type: text/plain\r\n",
+            b"camera[1].UniqueChannel=1\r\ncamera[1].Enable=true\r\ncamera[1].Name=hardware-id-2\r\ncamera[1].DeviceInfo.Enable=true\r\ncamera[1].DeviceInfo.Address=192.0.2.2\r\ncamera[0].UniqueChannel=0\r\ncamera[0].Enable=true\r\ncamera[0].Name=hardware-id-1\r\ncamera[0].DeviceInfo.Enable=true\r\ncamera[0].DeviceInfo.Address=192.0.2.1\r\ncamera[2].UniqueChannel=6\r\ncamera[2].Enable=false\r\ncamera[2].DeviceInfo.Enable=false\r\n",
+        );
+        drop(stream);
+        let mut titles = accept(&listener);
+        request(&mut titles);
+        response(
+            &mut titles,
             "200 OK",
             "Content-Type: text/plain\r\n",
             "table.ChannelTitle[1].Name=Backyard 2\r\ntable.ChannelTitle[0].Name=Garage żółty=1\r\n"
@@ -388,18 +408,48 @@ fn channel_title_api_returns_one_based_camera_indices_and_names() {
     assert_eq!(cameras.len(), 2);
     assert_eq!(cameras[0].index, 1);
     assert_eq!(cameras[0].name, "Garage żółty=1");
+    assert_eq!(cameras[0].address, "192.0.2.1");
     assert_eq!(cameras[1].index, 2);
     assert_eq!(cameras[1].name, "Backyard 2");
     handle.join().unwrap();
 }
 
 #[test]
-fn invalid_or_duplicate_channel_titles_are_rejected() {
+fn camera_list_api_ignores_disabled_slots_without_filtering_by_name() {
+    let (url, handle) = server(|listener| {
+        let mut stream = accept(&listener);
+        request(&mut stream);
+        response(
+            &mut stream,
+            "200 OK",
+            "Content-Type: text/plain\r\n",
+            b"camera[0].UniqueChannel=0\r\ncamera[0].Enable=true\r\ncamera[0].Name=Channel1\r\ncamera[0].DeviceInfo.Enable=true\r\ncamera[0].DeviceInfo.Address=192.0.2.1\r\ncamera[6].UniqueChannel=6\r\ncamera[6].Enable=false\r\ncamera[6].Name=Channel7\r\ncamera[6].DeviceInfo.Enable=false\r\ncamera[7].UniqueChannel=7\r\ncamera[7].Enable=false\r\ncamera[7].Name=Channel 8\r\ncamera[7].DeviceInfo.Enable=false\r\n",
+        );
+        drop(stream);
+        let mut titles = accept(&listener);
+        request(&mut titles);
+        response(
+            &mut titles,
+            "200 OK",
+            "Content-Type: text/plain\r\n",
+            b"table.ChannelTitle[0].Name=Garage\r\n",
+        );
+    });
+    let cameras = DahuaClient::new(config(url)).unwrap().cameras().unwrap();
+    assert_eq!(cameras.len(), 1);
+    assert_eq!(cameras[0].index, 1);
+    assert_eq!(cameras[0].name, "Garage");
+    handle.join().unwrap();
+}
+
+#[test]
+fn invalid_or_duplicate_camera_list_is_rejected() {
     for body in [
         "",
         "Error",
-        "table.ChannelTitle[0].Name=A\ntable.ChannelTitle[0].Name=B",
-        "table.ChannelTitle[4294967295].Name=A",
+        "camera[0].UniqueChannel=not-a-number\ncamera[0].Enable=true\ncamera[0].DeviceInfo.Enable=true",
+        "camera[0].UniqueChannel=4294967295\ncamera[0].Enable=true\ncamera[0].DeviceInfo.Enable=true\ncamera[0].Name=A\ncamera[0].DeviceInfo.Address=192.0.2.1",
+        "camera[0].UniqueChannel=0\ncamera[0].Enable=true\ncamera[0].DeviceInfo.Enable=true\ncamera[0].Name=A\ncamera[0].DeviceInfo.Address=192.0.2.1\ncamera[1].UniqueChannel=0\ncamera[1].Enable=true\ncamera[1].DeviceInfo.Enable=true\ncamera[1].Name=B\ncamera[1].DeviceInfo.Address=192.0.2.2",
     ] {
         let (url, handle) = server(move |listener| {
             let mut stream = accept(&listener);

@@ -9,8 +9,6 @@ Implemented on macOS. This preview is rendered at the logical display resolution
 its clock and connection state are illustrative. The four circles are physical
 controls on the case, not touch buttons inside the LCD.
 
-![Standby screen](standby.png)
-
 ```text
 ┌──────────────────────────────────────────────┐
 │ ARMED              <status>            22:15  │
@@ -92,30 +90,25 @@ capture may happen later, so the image is not guaranteed to show that exact pose
 
 ## Settings
 
-The menu layout is implemented with descriptions and Polish glyphs. Its four
-sections are currently unavailable and labelled WKRÓTCE; no active chevrons or
-selection highlight imply functionality that is not yet implemented.
+The menu shows Area Settings and Schedule. Area Settings opens the camera list;
+Schedule is labelled COMING SOON.
 
 ```text
 ARMED                  Settings              22:15
 
-Ustawienia obszaru
-Harmonogram
-Głośność / Test dźwięku
-Diagnostyka
+Area Settings
+Schedule
 
                                        Back
 ```
 
-Once implemented, Ustawienia obszaru opens the camera list. Harmonogram opens the
-[schedule editor](schedule.md). Audio settings provide volume and a sound test.
-Diagnostics shows connection/time/storage status without credentials or raw NVR
-responses. Back returns to Standby.
+Area Settings opens the camera list. Schedule is not implemented yet. Back
+returns to Standby.
 
-## Area: camera list
+## Area Settings: camera list
 
 ```text
-ARMED              Ustawienia obszaru         22:15
+ARMED              AREA SETTINGS              22:15
 
 1  Backyard 1
 2  Backyard 2
@@ -125,10 +118,12 @@ ARMED              Ustawienia obszaru         22:15
                                        Back
 ```
 
-Read camera numbers and names from the NVR. Selecting one opens its area editor.
-Do not duplicate discovery data in connection configuration. Channel slots
-reported by the NVR are not proof that every slot has a connected camera.
-Discovery errors leave Back available and show a retry action.
+Clicking Area Settings requests the camera list from the NVR's `getCameraAll`
+endpoint. The config stores masks in camera-list order and does not store camera
+names, indices, or IP addresses. This is the only time camera discovery runs;
+there is no periodic refresh.
+Selecting a camera opens its area editor. Discovery errors leave Back available
+and show a retry action.
 
 ## Area editor
 
@@ -143,10 +138,9 @@ ARMED                  Backyard 1            22:15
 <zoom / selection controls>
 ```
 
-Touch selects or deselects cells. Provide magnification for precise selection.
-Keep the complete camera frame and exclude letterboxed margins from selection.
-Save persists the selected cells for this camera atomically. Back leaves without
-saving the draft. An incoming alarm preserves the draft for returning to it.
-
-Snapshot refresh and zoom control placement will be settled with the rendered
-editor. No live video is required.
+Selecting a camera requests one JPEG snapshot from the NVR. Clicking a cell
+selects or deselects it; selected cells appear as a translucent red overlay.
+The blue Save button writes masks for all discovered cameras to the local JSON
+config as 160-character, row-major hex bitsets (least-significant bit first) and returns
+to the camera list. The red Back button returns without saving edits made since
+the last save. No periodic snapshots or live video are used.

@@ -6,11 +6,11 @@ use reqwest::{
     header::{CONTENT_TYPE, WWW_AUTHENTICATE},
     redirect::Policy,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 use std::{
     fmt,
-    io::{self, BufRead, BufReader, Read},
+    io::{self, BufRead, BufReader, Read, Write},
     path::Path,
     time::Duration,
 };
@@ -18,11 +18,14 @@ pub use subscription::{ConnectionState, RetryPolicy, Subscription};
 
 const EVENTS_PATH: &str = "/cgi-bin/eventManager.cgi?action=attach&codes=%5BAll%5D&heartbeat=5";
 const SNAPSHOT_PATH: &str = "/cgi-bin/snapshot.cgi";
+const CAMERA_LIST_PATH: &str = "/cgi-bin/LogicDeviceManager.cgi?action=getCameraAll";
 const CHANNEL_TITLES_PATH: &str = "/cgi-bin/configManager.cgi?action=getConfig&name=ChannelTitle";
 
 const MAX_PART: usize = 256 * 1024;
 const MAX_HEADERS: usize = 16 * 1024;
 const MAX_SNAPSHOT: u64 = 8 * 1024 * 1024;
+const AREA_MASK_BITS: usize = 32 * 20;
+const AREA_MASK_BYTES: usize = AREA_MASK_BITS / 8;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Error {
@@ -45,13 +48,14 @@ impl fmt::Display for Error {
 impl std::error::Error for Error {}
 type Result<T> = std::result::Result<T, Error>;
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
     pub schema_version: u32,
     pub nvr: NvrConfig,
+    pub cameras: Vec<CameraSettings>,
 }
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct NvrConfig {
     pub base_url: String,
@@ -62,21 +66,87 @@ pub struct NvrConfig {
     pub session_timeout_secs: u64,
     pub tls_insecure: bool,
 }
-#[derive(Clone, Copy, Deserialize)]
+#[derive(Clone, Copy, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Auth {
     Digest,
     Basic,
 }
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct Camera {
     pub index: u32,
     pub name: String,
+    pub address: String,
+    pub area_mask: Vec<bool>,
 }
 impl Camera {
     pub fn event_index(&self) -> Result<u32> {
         self.index.checked_sub(1).ok_or(Error::Config)
+    }
+}
+
+/// Persisted, positional camera settings. The 640 row-major mask bits are packed
+/// LSB-first into 80 bytes and stored as a hex string. Runtime camera
+/// identity and IP address are discovered from the NVR and are not serialized.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct CameraSettings {
+    pub area_mask: String,
+}
+
+impl CameraSettings {
+    pub fn from_mask(mask: &[bool]) -> Result<Self> {
+        if mask.len() != AREA_MASK_BITS {
+            return Err(Error::Config);
+        }
+        let mut bytes = [0_u8; AREA_MASK_BYTES];
+        for (index, selected) in mask.iter().enumerate() {
+            if *selected {
+                bytes[index / 8] |= 1 << (index % 8);
+            }
+        }
+        let mut area_mask = String::with_capacity(AREA_MASK_BYTES * 2);
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        for byte in bytes {
+            area_mask.push(HEX[(byte >> 4) as usize] as char);
+            area_mask.push(HEX[(byte & 0x0f) as usize] as char);
+        }
+        Ok(Self { area_mask })
+    }
+
+    pub fn decode_mask(&self) -> Result<Vec<bool>> {
+        let encoded = self.area_mask.as_str();
+        if encoded.len() != AREA_MASK_BYTES * 2 {
+            return Err(Error::Config);
+        }
+        let mut mask = Vec::with_capacity(AREA_MASK_BITS);
+        for pair in encoded.as_bytes().chunks_exact(2) {
+            let pair = std::str::from_utf8(pair).map_err(|_| Error::Config)?;
+            let byte = u8::from_str_radix(pair, 16).map_err(|_| Error::Config)?;
+            for bit in 0..8 {
+                mask.push(byte & (1 << bit) != 0);
+            }
+        }
+        Ok(mask)
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CameraSettingsInput {
+    area_mask: String,
+}
+
+impl<'de> Deserialize<'de> for CameraSettings {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let input = CameraSettingsInput::deserialize(deserializer)?;
+        let settings = Self {
+            area_mask: input.area_mask,
+        };
+        settings.decode_mask().map_err(serde::de::Error::custom)?;
+        Ok(settings)
     }
 }
 
@@ -97,7 +167,41 @@ impl Config {
             return Err(Error::Config);
         }
         base_url(&self.nvr.base_url)?;
+        for camera in &self.cameras {
+            camera.decode_mask()?;
+        }
         Ok(())
+    }
+
+    /// Replaces positional area settings atomically while preserving local config permissions.
+    pub fn save_camera_settings(path: impl AsRef<Path>, cameras: &[CameraSettings]) -> Result<()> {
+        let path = path.as_ref();
+        let metadata = std::fs::metadata(path).map_err(|_| Error::Config)?;
+        let current = Self::load(path)?;
+        let updated = Self {
+            schema_version: current.schema_version,
+            nvr: current.nvr,
+            cameras: cameras.to_vec(),
+        };
+        let encoded = serde_json::to_vec_pretty(&updated).map_err(|_| Error::Config)?;
+        let temporary = path.with_extension(format!("{}.{}.tmp", "json", std::process::id()));
+        let result = (|| {
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&temporary)
+                .map_err(|_| Error::Config)?;
+            file.set_permissions(metadata.permissions())
+                .map_err(|_| Error::Config)?;
+            file.write_all(&encoded).map_err(map_io)?;
+            file.sync_all().map_err(map_io)?;
+            drop(file);
+            std::fs::rename(&temporary, path).map_err(map_io)
+        })();
+        if result.is_err() {
+            let _ = std::fs::remove_file(temporary);
+        }
+        result
     }
 }
 fn base_url(value: &str) -> Result<Url> {
@@ -251,6 +355,7 @@ fn map_io(error: io::Error) -> Error {
     }
 }
 
+#[derive(Clone)]
 pub struct DahuaClient {
     client: Client,
     stream_client: reqwest::Client,
@@ -262,42 +367,24 @@ impl DahuaClient {
     pub fn network_host(&self) -> &str {
         self.base.host_str().unwrap_or("")
     }
-    /// Fetch channel titles without logging the private response or camera names.
+    /// Fetch configured camera metadata without logging addresses or camera names.
     pub fn cameras(&self) -> Result<Vec<Camera>> {
-        let response = self.get(CHANNEL_TITLES_PATH)?;
-        let mut bytes = Vec::new();
-        response
-            .take(MAX_PART as u64 + 1)
-            .read_to_end(&mut bytes)
-            .map_err(map_io)?;
-        if bytes.len() > MAX_PART {
-            return Err(Error::TooLarge);
-        }
-        let text = std::str::from_utf8(&bytes).map_err(|_| Error::Protocol)?;
-        let mut cameras = Vec::new();
-        for line in text.lines().filter(|line| !line.trim().is_empty()) {
-            let (key, name) = line.split_once('=').ok_or(Error::Protocol)?;
-            let event_index: u32 = key
-                .trim()
-                .strip_prefix("table.ChannelTitle[")
-                .and_then(|key| key.strip_suffix("].Name"))
-                .ok_or(Error::Protocol)?
-                .parse()
-                .map_err(|_| Error::Protocol)?;
-            let index = event_index.checked_add(1).ok_or(Error::Protocol)?;
-            let name = name.trim();
-            if cameras.iter().any(|c: &Camera| c.index == index) {
-                return Err(Error::Protocol);
-            }
-            cameras.push(Camera {
-                index,
-                name: name.to_owned(),
-            });
-        }
+        let response = self.get(CAMERA_LIST_PATH)?;
+        let mut cameras = parse_camera_list(&read_bounded(response, MAX_PART as u64)?)?;
         if cameras.is_empty() {
-            return Err(Error::Protocol);
+            return Ok(cameras);
         }
-        cameras.sort_by_key(|camera| camera.index);
+        let titles = parse_channel_titles(&read_bounded(
+            self.get(CHANNEL_TITLES_PATH)?,
+            MAX_PART as u64,
+        )?)?;
+        for camera in &mut cameras {
+            camera.name = titles
+                .get(&camera.event_index()?)
+                .filter(|name| !name.is_empty())
+                .cloned()
+                .ok_or(Error::Protocol)?;
+        }
         Ok(cameras)
     }
 
@@ -462,6 +549,199 @@ impl DahuaClient {
             return Err(Error::Snapshot);
         }
         Ok(bytes)
+    }
+}
+
+#[derive(Default)]
+struct CameraFields {
+    unique_channel: Option<u32>,
+    enabled: Option<bool>,
+    device_enabled: Option<bool>,
+    address: Option<String>,
+}
+
+fn parse_camera_list(bytes: &[u8]) -> Result<Vec<Camera>> {
+    let text = std::str::from_utf8(bytes).map_err(|_| Error::Protocol)?;
+    let mut records = std::collections::BTreeMap::<u32, CameraFields>::new();
+    for line in text.lines().filter(|line| !line.trim().is_empty()) {
+        let (key, value) = line.split_once('=').ok_or(Error::Protocol)?;
+        let Some(rest) = key.trim().strip_prefix("camera[") else {
+            continue;
+        };
+        let (record, field) = rest.split_once(']').ok_or(Error::Protocol)?;
+        let record: u32 = record.parse().map_err(|_| Error::Protocol)?;
+        let fields = records.entry(record).or_default();
+        let value = value.trim().trim_matches('"').to_owned();
+        match field {
+            ".UniqueChannel" => {
+                if fields
+                    .unique_channel
+                    .replace(value.parse().map_err(|_| Error::Protocol)?)
+                    .is_some()
+                {
+                    return Err(Error::Protocol);
+                }
+            }
+            ".Enable" => {
+                if fields.enabled.replace(parse_bool(&value)?).is_some() {
+                    return Err(Error::Protocol);
+                }
+            }
+            ".DeviceInfo.Enable" => {
+                if fields.device_enabled.replace(parse_bool(&value)?).is_some() {
+                    return Err(Error::Protocol);
+                }
+            }
+            ".DeviceInfo.Address" => fields.address = Some(value),
+            _ => {}
+        }
+    }
+    if records.is_empty() {
+        return Err(Error::Protocol);
+    }
+    let mut cameras = Vec::new();
+    for fields in records.into_values() {
+        if fields.enabled != Some(true) || fields.device_enabled != Some(true) {
+            continue;
+        }
+        let channel = fields.unique_channel.ok_or(Error::Protocol)?;
+        let index = channel.checked_add(1).ok_or(Error::Protocol)?;
+        let Some(address) = fields.address.filter(|address| !address.is_empty()) else {
+            continue;
+        };
+        cameras.push(Camera {
+            index,
+            name: String::new(),
+            address,
+            area_mask: vec![false; AREA_MASK_BITS],
+        });
+    }
+    cameras.sort_by_key(|camera| camera.index);
+    if cameras
+        .windows(2)
+        .any(|pair| pair[0].index == pair[1].index)
+    {
+        return Err(Error::Protocol);
+    }
+    Ok(cameras)
+}
+
+fn read_bounded(mut response: Response, max_size: u64) -> Result<Vec<u8>> {
+    if response
+        .content_length()
+        .is_some_and(|length| length > max_size)
+    {
+        return Err(Error::TooLarge);
+    }
+    let mut bytes = Vec::new();
+    response
+        .by_ref()
+        .take(max_size + 1)
+        .read_to_end(&mut bytes)
+        .map_err(map_io)?;
+    if bytes.len() as u64 > max_size {
+        return Err(Error::TooLarge);
+    }
+    Ok(bytes)
+}
+
+fn parse_channel_titles(bytes: &[u8]) -> Result<std::collections::BTreeMap<u32, String>> {
+    let text = std::str::from_utf8(bytes).map_err(|_| Error::Protocol)?;
+    let mut titles = std::collections::BTreeMap::new();
+    for line in text.lines().filter(|line| !line.trim().is_empty()) {
+        let (key, title) = line.split_once('=').ok_or(Error::Protocol)?;
+        let Some(index) = key
+            .trim()
+            .strip_prefix("table.ChannelTitle[")
+            .and_then(|key| key.strip_suffix("].Name"))
+        else {
+            continue;
+        };
+        let index: u32 = index.parse().map_err(|_| Error::Protocol)?;
+        if titles.insert(index, title.trim().to_owned()).is_some() {
+            return Err(Error::Protocol);
+        }
+    }
+    if titles.is_empty() {
+        return Err(Error::Protocol);
+    }
+    Ok(titles)
+}
+
+fn parse_bool(value: &str) -> Result<bool> {
+    match value.to_ascii_lowercase().as_str() {
+        "true" => Ok(true),
+        "false" => Ok(false),
+        _ => Err(Error::Protocol),
+    }
+}
+
+#[cfg(test)]
+mod camera_settings_tests {
+    use super::{CameraSettings, Config};
+
+    #[test]
+    fn area_mask_round_trips_as_compact_hex() {
+        let mut mask = vec![false; 32 * 20];
+        for index in [0, 7, 8, 319, 639] {
+            mask[index] = true;
+        }
+        let settings = CameraSettings::from_mask(&mask).unwrap();
+        assert_eq!(settings.area_mask.len(), 80 * 2);
+        assert_eq!(settings.decode_mask().unwrap(), mask);
+
+        let value = serde_json::to_value(&settings).unwrap();
+        assert_eq!(value.as_object().unwrap().len(), 1);
+        assert!(value.get("index").is_none());
+        assert!(value.get("address").is_none());
+        assert!(value.get("name").is_none());
+    }
+
+    #[test]
+    fn old_camera_metadata_is_not_accepted_in_config_entries() {
+        let value = serde_json::json!({
+            "index": 4,
+            "name": "Test camera",
+            "address": "192.0.2.4",
+            "area_mask": "0".repeat(160),
+        });
+        assert!(serde_json::from_value::<CameraSettings>(value).is_err());
+    }
+
+    #[test]
+    fn malformed_compact_mask_is_rejected() {
+        let value = serde_json::json!({ "area_mask": "abcd" });
+        assert!(serde_json::from_value::<CameraSettings>(value).is_err());
+    }
+
+    #[test]
+    fn saving_settings_keeps_nvr_config_and_removes_cached_camera_metadata() {
+        let path = std::env::temp_dir().join(format!(
+            "pager-camera-settings-{}-{}.json",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("test")
+        ));
+        let source = format!(
+            r#"{{"schema_version":1,"nvr":{{"base_url":"https://example.invalid","username":"test","password":"secret","auth":"digest","connect_timeout_secs":5,"session_timeout_secs":10,"tls_insecure":true}},"cameras":[{{"area_mask":"{}"}}]}}"#,
+            "0".repeat(160)
+        );
+        std::fs::write(&path, source).unwrap();
+        let settings = CameraSettings::from_mask(&vec![true; 32 * 20]).unwrap();
+
+        Config::save_camera_settings(&path, &[settings]).unwrap();
+
+        let saved: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(saved["nvr"]["base_url"], "https://example.invalid");
+        assert_eq!(saved["cameras"][0].as_object().unwrap().len(), 1);
+        assert_eq!(
+            saved["cameras"][0]["area_mask"].as_str().unwrap().len(),
+            160
+        );
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.find("schema_version").unwrap() < text.find("\"nvr\"").unwrap());
+        assert!(text.find("\"nvr\"").unwrap() < text.find("\"cameras\"").unwrap());
+        let _ = std::fs::remove_file(path);
     }
 }
 
