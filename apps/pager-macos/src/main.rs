@@ -3,8 +3,8 @@ use embedded_graphics::prelude::*;
 use minifb::{CursorStyle, Key, KeyRepeat, MouseButton, MouseMode, Scale, Window, WindowOptions};
 use pager_core::{Mode, Pager, Rectangle as AlarmRectangle};
 use pager_dahua::{
-    Camera, CameraSettings, Config, ConnectionState, DahuaClient, Error as DahuaError, Event,
-    Message, Subscription,
+    Camera, CameraSettings, Config, ConnectionState, DEFAULT_DEV_STORAGE_BUDGET_MB, DahuaClient,
+    Error as DahuaError, Event, Message, Subscription,
 };
 use pager_ui::{
     AREA_COLUMNS, AREA_IMAGE_HEIGHT, AREA_IMAGE_WIDTH, AREA_ROWS, Action, AreaCamera,
@@ -33,7 +33,7 @@ use network::NetworkPath;
 mod audio;
 use audio::Audio;
 mod history;
-use history::EventHistory;
+use history::{EventHistory, StorageStats};
 
 type LcdPixels = Vec<Rgb565>;
 type SnapshotResult = Result<LcdPixels, DahuaError>;
@@ -48,6 +48,40 @@ fn log(level: &str, message: impl std::fmt::Display) {
         "[{}] {level} {message}",
         chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f")
     );
+}
+
+fn log_storage_transition(
+    operation: &str,
+    before: Option<StorageStats>,
+    after: Result<StorageStats, Box<dyn std::error::Error>>,
+) {
+    match after {
+        Ok(after) => {
+            let change = before.map_or_else(
+                || "change=unknown".to_owned(),
+                |before| {
+                    let delta = after.used_bytes as i128 - before.used_bytes as i128;
+                    format!("change={delta:+} B")
+                },
+            );
+            log(
+                "STORAGE",
+                format!(
+                    "{operation}: used={:.2}/{:.2} MiB ({:.1}%), free={:.2} MiB, prune limit={:.2} MiB, until prune={:.2} MiB, {change}",
+                    after.used_bytes as f64 / (1024.0 * 1024.0),
+                    after.budget_bytes as f64 / (1024.0 * 1024.0),
+                    after.occupancy_percent,
+                    after.free_bytes as f64 / (1024.0 * 1024.0),
+                    after.prune_limit_bytes as f64 / (1024.0 * 1024.0),
+                    after.bytes_until_prune as f64 / (1024.0 * 1024.0),
+                ),
+            );
+        }
+        Err(error) => log(
+            "STORAGE ERROR",
+            format!("{operation}: could not read usage: {error}"),
+        ),
+    }
 }
 
 struct FileIoActivity(Arc<AtomicUsize>);
@@ -422,18 +456,26 @@ fn record_history_event(
     timestamp: &str,
     camera: u8,
 ) -> Option<u64> {
+    let storage_before = history.storage_stats().ok();
     let camera_name = ui
         .cameras()
         .get(camera as usize)
         .map(|camera| camera.name.clone())
         .unwrap_or_else(|| format!("Camera {}", camera + 1));
     let description = "Human".to_owned();
-    match history.record(
+    let result = history.record(
         timestamp.to_owned(),
         camera_name.clone(),
         description.clone(),
-    ) {
+    );
+    log_storage_transition(
+        "event metadata write",
+        storage_before,
+        history.storage_stats(),
+    );
+    match result {
         Ok(id) => {
+            ui.retain_history_ids(&history.entry_ids());
             ui.add_history_entry(HistoryEntry {
                 id,
                 camera_name,
@@ -444,6 +486,7 @@ fn record_history_event(
             Some(id)
         }
         Err(error) => {
+            ui.retain_history_ids(&history.entry_ids());
             log(
                 "HISTORY ERROR",
                 format!("event could not be saved: {error}"),
@@ -581,16 +624,32 @@ fn main() -> Result<(), Box<dyn Error>> {
         "UI",
         "initial LCD frame presented before NVR initialization",
     );
-    let mut history_store = match EventHistory::load(config_path) {
+    let storage_budget_mb = Config::load(config_path)
+        .map(|config| config.dev_storage_budget_mb)
+        .unwrap_or(DEFAULT_DEV_STORAGE_BUDGET_MB);
+    let storage_limit_bytes = storage_budget_mb
+        .saturating_mul(1024 * 1024)
+        .saturating_mul(90)
+        / 100;
+    log(
+        "STORAGE",
+        format!(
+            "Mac development budget={storage_budget_mb} MiB; history cap at 90% ({:.1} MiB)",
+            storage_limit_bytes as f64 / (1024.0 * 1024.0)
+        ),
+    );
+    let storage_budget_bytes = storage_budget_mb.saturating_mul(1024 * 1024);
+    let mut history_store = match EventHistory::load(config_path, storage_budget_bytes) {
         Ok(history) => history,
         Err(error) => {
             log(
                 "HISTORY ERROR",
                 format!("could not load local history: {error}"),
             );
-            EventHistory::empty(config_path)
+            EventHistory::empty(config_path, storage_budget_bytes)
         }
     };
+    log_storage_transition("startup history scan", None, history_store.storage_stats());
     let file_io_active = Arc::new(AtomicUsize::new(0));
     ui.set_history(history_store.ui_entries());
     let mut lcd_down = false;
@@ -898,7 +957,15 @@ fn main() -> Result<(), Box<dyn Error>> {
                     Ok((image, jpeg)) => {
                         if let Some(history_id) = snapshot_history_ids.remove(&sequence) {
                             let _activity = FileIoActivity::begin(file_io_active.clone());
-                            match history_store.record_snapshot(history_id, &jpeg) {
+                            let storage_before = history_store.storage_stats().ok();
+                            let result = history_store.record_snapshot(history_id, &jpeg);
+                            log_storage_transition(
+                                "snapshot write",
+                                storage_before,
+                                history_store.storage_stats(),
+                            );
+                            ui.retain_history_ids(&history_store.entry_ids());
+                            match result {
                                 Ok(file_name) => {
                                     log("HISTORY", "snapshot attached to saved event");
                                     ui.set_history_snapshot_file(history_id, file_name);

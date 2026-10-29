@@ -31,9 +31,9 @@ Run the Mac app with `cargo run -p pager-macos`. It reads private
 1. **Weekly schedule:** add Settings controls for ARMED, MUTED and DISARMED
    periods, with local-time display and DST-safe transitions. See
    [docs/ui/schedule.md](docs/ui/schedule.md).
-2. **Storage limits:** enforce the agreed 90% SD occupancy threshold on the
-   device. Use a configurable artificial storage budget on macOS for
-   development. Prune oldest complete records and snapshots first.
+2. **Storage limits:** implement the 90% occupancy threshold against actual SD
+   capacity on the device. The Mac development build already has a configurable
+   artificial budget and prunes oldest complete records and snapshots first.
 3. **ESP32-S3 port:** connect the shared renderer and alarm logic to the actual
    display, buttons, status LEDs, Wi-Fi, SD card and audio hardware. Measure
    memory and JPEG decode time on the target device.
@@ -51,4 +51,7 @@ Run the Mac app with `cargo run -p pager-macos`. It reads private
   a later frame. The original NVR image caption is preserved.
 - The red status LED stays on in ARMED and is off in MUTED and DISARMED. The
   green status LED blinks during file reads and writes.
+- The Mac history store uses up to 90% of its configurable development budget,
+  pruning oldest complete records and snapshots first. If no complete record
+  can be pruned, new snapshots are rejected; event metadata is kept when it fits.
 - Keep local NVR credentials, camera names and captures out of Git and logs.

@@ -26,6 +26,7 @@ const MAX_HEADERS: usize = 16 * 1024;
 const MAX_SNAPSHOT: u64 = 8 * 1024 * 1024;
 const AREA_MASK_BITS: usize = 32 * 20;
 const AREA_MASK_BYTES: usize = AREA_MASK_BITS / 8;
+pub const DEFAULT_DEV_STORAGE_BUDGET_MB: u64 = 64;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Error {
@@ -56,6 +57,12 @@ pub struct Config {
     pub cameras: Vec<CameraSettings>,
     #[serde(default)]
     pub demo_mode: bool,
+    #[serde(default = "default_dev_storage_budget_mb")]
+    pub dev_storage_budget_mb: u64,
+}
+
+fn default_dev_storage_budget_mb() -> u64 {
+    DEFAULT_DEV_STORAGE_BUDGET_MB
 }
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -176,6 +183,7 @@ impl Config {
             || self.nvr.password.is_empty()
             || self.nvr.connect_timeout_secs == 0
             || self.nvr.session_timeout_secs == 0
+            || self.dev_storage_budget_mb == 0
         {
             return Err(Error::Config);
         }
@@ -196,6 +204,7 @@ impl Config {
             nvr: current.nvr,
             cameras: cameras.to_vec(),
             demo_mode: current.demo_mode,
+            dev_storage_budget_mb: current.dev_storage_budget_mb,
         };
         let encoded = serde_json::to_vec_pretty(&updated).map_err(|_| Error::Config)?;
         let temporary = path.with_extension(format!("{}.{}.tmp", "json", std::process::id()));
@@ -723,7 +732,7 @@ fn event_boundary(headers: &reqwest::header::HeaderMap) -> Result<String> {
 
 #[cfg(test)]
 mod camera_settings_tests {
-    use super::{CameraSettings, Config};
+    use super::{CameraSettings, Config, DEFAULT_DEV_STORAGE_BUDGET_MB};
 
     #[test]
     fn area_mask_round_trips_as_compact_hex() {
@@ -809,5 +818,6 @@ mod camera_settings_tests {
         });
         let config: Config = serde_json::from_value(value).unwrap();
         assert!(!config.demo_mode);
+        assert_eq!(config.dev_storage_budget_mb, DEFAULT_DEV_STORAGE_BUDGET_MB);
     }
 }

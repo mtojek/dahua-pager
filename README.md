@@ -30,7 +30,9 @@ Keep `config.local.json` private; it is ignored by Git.
 
 History metadata is stored in `config.local.history.json`; JPEG files are in
 `config.local.history/`. The newest 1,000 records are retained. Both paths are
-ignored by Git.
+ignored by Git. On Mac, the development storage budget defaults to 64 MiB and
+can be changed with `dev_storage_budget_mb` in the local config; history uses
+up to 90% and prunes oldest complete records first.
 
 ## Controls
 

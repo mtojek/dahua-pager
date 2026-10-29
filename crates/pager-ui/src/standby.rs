@@ -359,6 +359,25 @@ impl Ui {
         self.history_pending.clear();
     }
 
+    pub fn retain_history_ids(&mut self, ids: &[u64]) {
+        let selected_id = self.selected_history_entry().map(|entry| entry.id);
+        self.history.retain(|entry| ids.contains(&entry.id));
+        self.history_pending.retain(|id| ids.contains(id));
+        self.history_selected = selected_id
+            .and_then(|id| self.history.iter().position(|entry| entry.id == id))
+            .unwrap_or_else(|| self.history.len().saturating_sub(1));
+        if self
+            .history_image
+            .as_ref()
+            .is_some_and(|(id, _)| !ids.contains(id))
+        {
+            self.history_image = None;
+        }
+        if self.history_loading.is_some_and(|id| !ids.contains(&id)) {
+            self.history_loading = None;
+        }
+    }
+
     pub fn history(&self) -> &[HistoryEntry] {
         &self.history
     }
