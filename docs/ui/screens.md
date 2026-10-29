@@ -33,8 +33,8 @@ the screen; even Escape only wakes it while asleep.
 
 The blue Mode button cycles **ARMED → MUTED → DISARMED → ARMED**. The header
 shows the resulting mode. MUTED records new alarms without sound; DISARMED ignores
-new detections. Mode changes never replay existing alarms. History and Settings currently open placeholder screens with Back; their
-full content below remains planned. Mouse clicks activate on release, and dragging
+new detections. Mode changes never replay existing alarms. History currently opens a placeholder; Settings shows the menu below with
+unavailable sections marked WKRÓTCE. Both retain the physical Back action. Mouse clicks activate on release, and dragging
 off a circular physical button cancels it. Keyboard focus follows Tab/arrows; Enter activates it. Clicks inside the standby LCD do not activate the case controls.
 
 The normal app reads local config and shows the reconnecting NVR subscription's
@@ -92,6 +92,10 @@ capture may happen later, so the image is not guaranteed to show that exact pose
 
 ## Settings
 
+The menu layout is implemented with descriptions and Polish glyphs. Its four
+sections are currently unavailable and labelled WKRÓTCE; no active chevrons or
+selection highlight imply functionality that is not yet implemented.
+
 ```text
 ARMED                  Settings              22:15
 
@@ -103,7 +107,7 @@ Diagnostyka
                                        Back
 ```
 
-Ustawienia obszaru opens the camera list. Harmonogram opens the
+Once implemented, Ustawienia obszaru opens the camera list. Harmonogram opens the
 [schedule editor](schedule.md). Audio settings provide volume and a sound test.
 Diagnostics shows connection/time/storage status without credentials or raw NVR
 responses. Back returns to Standby.

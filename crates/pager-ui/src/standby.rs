@@ -1,7 +1,7 @@
 use embedded_graphics::{
     mono_font::{
         MonoTextStyle,
-        ascii::{FONT_6X10, FONT_9X18},
+        iso_8859_2::{FONT_6X10, FONT_9X18, FONT_9X18_BOLD},
     },
     pixelcolor::Rgb565,
     prelude::*,
@@ -10,9 +10,10 @@ use embedded_graphics::{
 };
 use pager_core::{Mode, Pager};
 
-const BACKGROUND: Rgb565 = Rgb565::new(1, 3, 4);
-const BORDER: Rgb565 = Rgb565::new(7, 17, 17);
-const MUTED: Rgb565 = Rgb565::new(15, 33, 18);
+const BACKGROUND: Rgb565 = Rgb565::new(1, 3, 2);
+const BORDER: Rgb565 = Rgb565::new(4, 8, 5);
+const SECONDARY: Rgb565 = Rgb565::new(18, 38, 19);
+const PRIMARY: Rgb565 = Rgb565::new(28, 58, 29);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Screen {
@@ -42,13 +43,13 @@ pub enum ConnectionStatus {
 impl ConnectionStatus {
     fn label(self) -> &'static str {
         match self {
-            Self::NoConfig => "NVR: NO CONFIG",
-            Self::ConfigError => "NVR: CONFIG ERROR",
-            Self::Connecting => "NVR: CONNECTING",
-            Self::Online => "NVR: ONLINE",
-            Self::RetryWaiting => "NVR: RETRY WAIT",
-            Self::Offline => "NVR: OFFLINE",
-            Self::Overflow => "NVR: DATA LOST",
+            Self::NoConfig => "NVR NO CONFIG",
+            Self::ConfigError => "NVR CONFIG ERROR",
+            Self::Connecting => "NVR CONNECTING",
+            Self::Online => "NVR ONLINE",
+            Self::RetryWaiting => "NVR RETRY WAIT",
+            Self::Offline => "NVR OFFLINE",
+            Self::Overflow => "NVR DATA LOST",
         }
     }
 }
@@ -159,9 +160,9 @@ impl Ui {
         }
         display.clear(BACKGROUND)?;
         let bar_color = match pager.mode {
-            Mode::Armed => Rgb565::new(20, 2, 3),
-            Mode::Muted => Rgb565::new(24, 30, 0),
-            Mode::Disarmed => Rgb565::new(1, 23, 7),
+            Mode::Armed => Rgb565::new(14, 9, 5),
+            Mode::Muted => Rgb565::new(15, 21, 3),
+            Mode::Disarmed => Rgb565::new(4, 23, 7),
         };
         Rectangle::new(Point::zero(), Size::new(480, 24))
             .into_styled(PrimitiveStyle::with_fill(bar_color))
@@ -174,16 +175,12 @@ impl Ui {
             Mode::Muted => "MUTED",
             Mode::Disarmed => "DISARMED",
         };
-        // Thicken the bitmap glyphs by one pixel without changing font size.
-        for x in [12, 13] {
-            text(
-                display,
-                mode,
-                Point::new(x, 18),
-                Alignment::Left,
-                Rgb565::WHITE,
-            )?;
-        }
+        Text::new(
+            mode,
+            Point::new(12, 18),
+            MonoTextStyle::new(&FONT_9X18_BOLD, Rgb565::WHITE),
+        )
+        .draw(display)?;
         text(
             display,
             time,
@@ -194,7 +191,7 @@ impl Ui {
         if self.screen == Screen::Standby {
             Text::with_alignment(
                 connection.label(),
-                Point::new(245, 16),
+                Point::new(240, 16),
                 MonoTextStyle::new(&FONT_6X10, Rgb565::WHITE),
                 Alignment::Center,
             )
@@ -206,18 +203,22 @@ impl Ui {
                 } else {
                     "SETTINGS"
                 },
-                Point::new(245, 16),
+                Point::new(240, 16),
                 MonoTextStyle::new(&FONT_6X10, Rgb565::WHITE),
                 Alignment::Center,
             )
             .draw(display)?;
-            text(
-                display,
-                "Not available yet",
-                Point::new(240, 152),
-                Alignment::Center,
-                MUTED,
-            )?;
+            if self.screen == Screen::Settings {
+                render_settings(display)?;
+            } else {
+                text(
+                    display,
+                    "No history yet",
+                    Point::new(240, 152),
+                    Alignment::Center,
+                    SECONDARY,
+                )?;
+            }
         }
         Ok(())
     }
@@ -232,6 +233,46 @@ impl Ui {
             Action::Wake => "Wake",
         }
     }
+}
+
+fn render_settings<D: DrawTarget<Color = Rgb565>>(display: &mut D) -> Result<(), D::Error> {
+    let rows = [
+        ("Ustawienia obszaru", "Obszary detekcji dla każdej kamery"),
+        ("Harmonogram", "Tryby pracy według dni i godzin"),
+        ("Dźwięk", "Głośność i test alarmu"),
+        ("Diagnostyka", "Połączenie, czas i pamięć"),
+    ];
+    for (i, (title, description)) in rows.iter().enumerate() {
+        let top = 44 + i as i32 * 58;
+        text(
+            display,
+            title,
+            Point::new(16, top + 12),
+            Alignment::Left,
+            PRIMARY,
+        )?;
+        Text::new(
+            description,
+            Point::new(16, top + 31),
+            MonoTextStyle::new(&FONT_6X10, SECONDARY),
+        )
+        .draw(display)?;
+        // These sections are not implemented; do not draw active chevrons or
+        // a selected row that would imply they can already be opened.
+        Text::with_alignment(
+            "WKRÓTCE",
+            Point::new(464, top + 12),
+            MonoTextStyle::new(&FONT_6X10, SECONDARY),
+            Alignment::Right,
+        )
+        .draw(display)?;
+        if i < rows.len() - 1 {
+            Rectangle::new(Point::new(16, top + 49), Size::new(448, 1))
+                .into_styled(PrimitiveStyle::with_fill(BORDER))
+                .draw(display)?;
+        }
+    }
+    Ok(())
 }
 fn text<D: DrawTarget<Color = Rgb565>>(
     display: &mut D,

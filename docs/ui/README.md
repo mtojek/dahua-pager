@@ -3,8 +3,8 @@
 Design for the 480 × 320 ILI9488 display. The macOS simulator uses scale 1:1;
 the additional case area holds physical controls outside the LCD. Mouse input
 stands in for touch. These documents describe the target UI.
-Standby is implemented; History and Settings are navigation shells.
-Other views remain planned.
+Standby is implemented. Settings has the menu layout with upcoming sections;
+History is a navigation shell. Other views remain planned.
 
 - [Screens](screens.md): layout, actions and navigation.
 - [Schedule](schedule.md): weekly ARMED / MUTED / DISARMED periods.
@@ -52,6 +52,9 @@ acknowledging anything. After ACK, records remain available in History.
 ## Layout and input
 
 - Header: mode or ALARM, context/connection status, time.
+- LCD text uses the Latin-2 bitmap font family, including Polish glyphs. Mode
+  text uses the real bold font; context titles and NVR status share a small
+  uppercase font and alignment. Colors are subdued red/amber/green on near-black.
 - The bold mode text is white, with no badge or border. The entire header is
   red for ARMED, amber for MUTED and green for DISARMED.
 - Physical right-side controls: red above blue, outside the LCD.

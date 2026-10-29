@@ -17,7 +17,7 @@ cargo run -p pager-macos
 Click the physical buttons, or use **Tab/arrows + Enter**. Red/**S** sleeps the
 LCD; blue/**M** cycles ARMED → MUTED → DISARMED. Any button/key wakes the LCD
 without also acting. **H** opens History, **T** opens Settings, **Backspace**
-returns, **Esc** exits when awake. History and Settings are placeholders for the next views.
+returns, **Esc** exits when awake.
 
 The earlier synthetic alarm demo is available with `cargo run -p pager-macos -- --demo`.
 In the demo: **1–6** trigger alarms, **←/→** browse, **A** acknowledges all,

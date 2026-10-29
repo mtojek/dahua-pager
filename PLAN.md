@@ -101,7 +101,7 @@ Reserve a 24-pixel header and a bottom metadata row where needed. Physical actio
 - MUTED is a persistent mode change; ACK is confirmation of existing alarms only. Display the current mode and manual/schedule source clearly.
 - History has no Clear action. Only the configured automatic retention policy removes old eligible records.
 - On Standby the red button sleeps the LCD only; it does not disarm, mute, stop audio or disconnect NVR. Any physical button wakes it and consumes that first action. The blue button cycles ARMED → MUTED → DISARMED → ARMED. Sleeping state is independent of mode and acknowledgement.
-- Standby is implemented on macOS with the shared renderer, live connection status, system time, click/keyboard input and sleep/mode controls. History and Settings currently open placeholder screens. Real detection/snapshot integration and the other full views remain planned. The older synthetic alarm workflow is available only with `--demo`.
+- Standby is implemented on macOS with the shared renderer, live connection status, system time, click/keyboard input and sleep/mode controls. History currently opens a placeholder; Settings renders its menu with descriptions and unavailable-section labels. The LCD uses the Polish-capable Latin-2 font family, real bold mode labels and subdued colors. Real detection/snapshot integration and the other full views remain planned. The older synthetic alarm workflow is available only with `--demo`.
 
 ## 8. Scheduling and clock
 
