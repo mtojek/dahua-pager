@@ -1,19 +1,21 @@
 use embedded_graphics::pixelcolor::Rgb565;
 use embedded_graphics::prelude::*;
 use minifb::{CursorStyle, Key, KeyRepeat, MouseButton, MouseMode, Scale, Window, WindowOptions};
-use pager_core::{Mode, Pager};
+use pager_core::{Mode, Pager, Rectangle as AlarmRectangle};
 use pager_dahua::{
-    Camera, CameraSettings, Config, ConnectionState, DahuaClient, Error as DahuaError, Subscription,
+    Camera, CameraSettings, Config, ConnectionState, DahuaClient, Error as DahuaError, Event,
+    Message, Subscription,
 };
 use pager_ui::{
     AREA_COLUMNS, AREA_IMAGE_HEIGHT, AREA_IMAGE_WIDTH, AREA_ROWS, Action, AreaCamera,
     ConnectionStatus, HEIGHT, Ui, WIDTH,
 };
+use rand::Rng;
 use std::{
     error::Error,
     path::Path,
-    sync::mpsc::{self, Receiver, TryRecvError},
-    time::Instant,
+    sync::mpsc::{self, Receiver, SyncSender, TryRecvError},
+    time::{Duration, Instant},
 };
 
 mod framebuffer;
@@ -26,6 +28,59 @@ use network::NetworkPath;
 
 mod audio;
 use audio::Audio;
+
+fn log(level: &str, message: impl std::fmt::Display) {
+    eprintln!(
+        "[{}] {level} {message}",
+        chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f")
+    );
+}
+
+fn apply_ui_action(ui: &mut Ui, pager: &mut Pager, action: Action) {
+    let previous_screen = ui.screen;
+    let previous_mode = pager.mode;
+    let previous_asleep = ui.is_asleep();
+    let pending_before = pager
+        .alarms
+        .iter()
+        .filter(|alarm| !alarm.acknowledged)
+        .count();
+    ui.apply(action, pager);
+    if previous_screen != ui.screen {
+        log(
+            "UI",
+            format!("screen {previous_screen:?} -> {:?}", ui.screen),
+        );
+    }
+    if previous_mode != pager.mode {
+        log("MODE", format!("{previous_mode:?} -> {:?}", pager.mode));
+    }
+    if previous_asleep != ui.is_asleep() {
+        log(
+            "UI",
+            if ui.is_asleep() {
+                "LCD sleeping"
+            } else {
+                "LCD awake"
+            },
+        );
+    }
+    if action == Action::Acknowledge {
+        let pending_after = pager
+            .alarms
+            .iter()
+            .filter(|alarm| !alarm.acknowledged)
+            .count();
+        log(
+            "ALARM",
+            format!(
+                "ACK acknowledged {pending_before} alarm(s); pending={pending_after}; mode={:?}",
+                pager.mode
+            ),
+        );
+    }
+    log("INPUT", format!("action={action:?}"));
+}
 
 fn preview(path: &str) -> Result<(), Box<dyn Error>> {
     let mut frame = Framebuffer::new(WIDTH as usize, HEIGHT as usize);
@@ -48,27 +103,59 @@ fn connect(
     ConnectionStatus,
     Option<NetworkPath>,
     Option<DahuaClient>,
+    bool,
 ) {
     if !Path::new(path).exists() {
-        return (None, ConnectionStatus::NoConfig, None, None);
+        log("NVR", "configuration file not found; running offline");
+        return (None, ConnectionStatus::NoConfig, None, None, false);
     }
-    let subscription = Config::load(path)
-        .and_then(|config| DahuaClient::new(config.nvr))
-        .and_then(|client| {
-            let camera_client = client.clone();
-            let monitor = NetworkPath::new(client.network_host());
-            client
-                .subscribe()
-                .map(|subscription| (subscription, monitor, camera_client))
-        });
+    log(
+        "NVR",
+        "loading local configuration (secrets and host are not logged)",
+    );
+    let config = match Config::load(path) {
+        Ok(config) => config,
+        Err(error) => {
+            log(
+                "NVR ERROR",
+                format!("configuration could not be loaded: {error}"),
+            );
+            return (None, ConnectionStatus::ConfigError, None, None, false);
+        }
+    };
+    let demo_mode = config.demo_mode;
+    if demo_mode {
+        log(
+            "DEMO",
+            "demo_mode enabled; synthetic alarm scheduled 15 seconds after launch",
+        );
+    }
+    let subscription = DahuaClient::new(config.nvr).and_then(|client| {
+        log("NVR", "opening event subscription");
+        let camera_client = client.clone();
+        let monitor = NetworkPath::new(client.network_host());
+        client
+            .subscribe()
+            .map(|subscription| (subscription, monitor, camera_client))
+    });
     match subscription {
-        Ok((subscription, monitor, camera_client)) => (
-            Some(subscription),
-            ConnectionStatus::Connecting,
-            monitor,
-            Some(camera_client),
-        ),
-        Err(_) => (None, ConnectionStatus::ConfigError, None, None),
+        Ok((subscription, monitor, camera_client)) => {
+            log("NVR", "event subscription worker started");
+            (
+                Some(subscription),
+                ConnectionStatus::Connecting,
+                monitor,
+                Some(camera_client),
+                demo_mode,
+            )
+        }
+        Err(error) => {
+            log(
+                "NVR ERROR",
+                format!("could not start subscription: {error}"),
+            );
+            (None, ConnectionStatus::ConfigError, None, None, demo_mode)
+        }
     }
 }
 
@@ -79,15 +166,32 @@ fn refresh_cameras(
     let client = client?.clone();
     let config_path = config_path.to_owned();
     let (sender, receiver) = mpsc::channel();
+    log("CAMERAS", "refresh requested from Area Settings");
     std::thread::spawn(move || {
         let result = client.cameras().and_then(|mut cameras| {
+            log(
+                "CAMERAS",
+                format!("NVR returned {} enabled camera(s)", cameras.len()),
+            );
             let saved = Config::load(&config_path)?.cameras;
-            for (camera, previous) in cameras.iter_mut().zip(saved.iter()) {
-                camera.area_mask = previous.decode_mask()?;
+            for (position, camera) in cameras.iter_mut().enumerate() {
+                let previous = saved
+                    .iter()
+                    .find(|previous| {
+                        !previous.camera_id.is_empty() && previous.camera_id == camera.name
+                    })
+                    .or_else(|| {
+                        saved
+                            .get(position)
+                            .filter(|previous| previous.camera_id.is_empty())
+                    });
+                if let Some(previous) = previous {
+                    camera.area_mask = previous.decode_mask()?;
+                }
             }
             let settings = cameras
                 .iter()
-                .map(|camera| CameraSettings::from_mask(&camera.area_mask))
+                .map(|camera| CameraSettings::identified(&camera.name, &camera.area_mask))
                 .collect::<Result<Vec<_>, _>>()?;
             Config::save_camera_settings(&config_path, &settings)?;
             Ok(cameras)
@@ -109,25 +213,37 @@ fn finish_camera_refresh(
     if let Some(result) = result {
         *receiver = None;
         match result {
-            Ok(cameras) => ui.set_cameras(
-                cameras
-                    .into_iter()
-                    .map(|camera| {
-                        let mut area =
-                            AreaCamera::new(camera.index, camera.name).with_address(camera.address);
-                        for (offset, selected) in camera
-                            .area_mask
-                            .into_iter()
-                            .take(AREA_COLUMNS * AREA_ROWS)
-                            .enumerate()
-                        {
-                            area.mask[offset / AREA_COLUMNS][offset % AREA_COLUMNS] = selected;
-                        }
-                        area
-                    })
-                    .collect(),
-            ),
-            Err(_) => ui.fail_camera_refresh(),
+            Ok(cameras) => {
+                log(
+                    "CAMERAS",
+                    format!(
+                        "camera refresh completed: {} camera(s); names omitted from log",
+                        cameras.len()
+                    ),
+                );
+                ui.set_cameras(
+                    cameras
+                        .into_iter()
+                        .map(|camera| {
+                            let mut area = AreaCamera::new(camera.index, camera.name)
+                                .with_address(camera.address);
+                            for (offset, selected) in camera
+                                .area_mask
+                                .into_iter()
+                                .take(AREA_COLUMNS * AREA_ROWS)
+                                .enumerate()
+                            {
+                                area.mask[offset / AREA_COLUMNS][offset % AREA_COLUMNS] = selected;
+                            }
+                            area
+                        })
+                        .collect(),
+                )
+            }
+            Err(error) => {
+                log("CAMERAS ERROR", format!("refresh failed: {error}"));
+                ui.fail_camera_refresh()
+            }
         }
     }
 }
@@ -162,6 +278,120 @@ fn fetch_snapshot(client: &DahuaClient, channel: u32) -> Receiver<Result<Vec<Rgb
     receiver
 }
 
+fn start_alarm_snapshot_worker(
+    client: DahuaClient,
+) -> (
+    SyncSender<(u64, u32)>,
+    Receiver<(u64, Result<Vec<Rgb565>, DahuaError>)>,
+) {
+    let (request_tx, request_rx) = mpsc::sync_channel::<(u64, u32)>(128);
+    let (result_tx, result_rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        while let Ok((sequence, channel)) = request_rx.recv() {
+            log(
+                "SNAPSHOT",
+                format!("request started alarm={sequence} channel={channel}"),
+            );
+            let result = client
+                .snapshot(channel)
+                .and_then(|bytes| decode_snapshot(&bytes).ok_or(DahuaError::Snapshot));
+            if result.is_ok() {
+                log(
+                    "SNAPSHOT",
+                    format!("request completed alarm={sequence} channel={channel}"),
+                );
+            } else {
+                log(
+                    "SNAPSHOT ERROR",
+                    format!(
+                        "request failed alarm={sequence} channel={channel}: {}",
+                        result.as_ref().err().expect("checked error")
+                    ),
+                );
+            }
+            if result_tx.send((sequence, result)).is_err() {
+                log("SNAPSHOT", "UI closed; stopping snapshot worker");
+                break;
+            }
+        }
+    });
+    (request_tx, result_rx)
+}
+
+fn human_detection(event: &Event) -> Option<(Vec<AlarmRectangle>, String)> {
+    if event.code != "SmartMotionHuman" || event.action != "Start" {
+        return None;
+    }
+    let timestamp = event.data.get("LocaleTime")?.as_str()?.to_owned();
+    // The recorder's 4K human rectangles use its 0..8192 coordinate plane.
+    let objects = event.data.get("object")?.as_array()?;
+    let rectangles: Vec<_> = objects
+        .iter()
+        .filter_map(|object| {
+            let coordinates = object.get("Rect")?.as_array()?;
+            if coordinates.len() != 4 {
+                return None;
+            }
+            let values: Vec<u16> = coordinates
+                .iter()
+                .map(|value| u16::try_from(value.as_u64()?).ok())
+                .collect::<Option<_>>()?;
+            let rect = AlarmRectangle {
+                left: values[0],
+                top: values[1],
+                right: values[2],
+                bottom: values[3],
+            };
+            (rect.left < rect.right
+                && rect.top < rect.bottom
+                && rect.right <= 8192
+                && rect.bottom <= 8192)
+                .then_some(rect)
+        })
+        .collect();
+    (!rectangles.is_empty()).then_some((rectangles, timestamp))
+}
+
+fn random_demo_rectangle() -> AlarmRectangle {
+    let mut rng = rand::thread_rng();
+    let width = rng.gen_range(550_u16..=1150);
+    let height = rng.gen_range(1500_u16..=2900);
+    let left = rng.gen_range(0..=8192 - width);
+    let top = rng.gen_range(0..=8192 - height);
+    AlarmRectangle {
+        left,
+        top,
+        right: left + width,
+        bottom: top + height,
+    }
+}
+
+fn initial_areas(config_path: &str) -> Vec<AreaCamera> {
+    Config::load(config_path)
+        .map(|config| {
+            config
+                .cameras
+                .into_iter()
+                .enumerate()
+                .map(|(index, saved)| {
+                    let label = if saved.camera_id.is_empty() {
+                        format!("Camera {}", index + 1)
+                    } else {
+                        saved.camera_id.clone()
+                    };
+                    let mut area = AreaCamera::new(index as u32 + 1, label);
+                    if let Ok(mask) = saved.decode_mask() {
+                        for (offset, selected) in mask.into_iter().enumerate() {
+                            area.mask[offset / AREA_COLUMNS][offset % AREA_COLUMNS] = selected;
+                        }
+                    }
+                    area
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn begin_selected_snapshot(
     client: Option<&DahuaClient>,
     ui: &mut Ui,
@@ -181,7 +411,8 @@ fn save_area_masks(config_path: &str, ui: &Ui) -> Result<(), DahuaError> {
         .cameras()
         .iter()
         .map(|area| {
-            CameraSettings::from_mask(
+            CameraSettings::identified(
+                &area.name,
                 &area
                     .mask
                     .iter()
@@ -209,6 +440,9 @@ fn status_from_state(state: ConnectionState, dropped_messages: u64) -> Connectio
 
 fn main() -> Result<(), Box<dyn Error>> {
     let args: Vec<String> = std::env::args().collect();
+    if args.iter().any(|arg| arg == "--demo") {
+        return Err("--demo was removed; configure the real NVR to run the app.".into());
+    }
     if args.iter().any(|arg| arg == "--check-audio") {
         let _audio = Audio::new()?;
         println!("Native audio output initialized (no sound played)");
@@ -217,19 +451,15 @@ fn main() -> Result<(), Box<dyn Error>> {
     if let Some(i) = args.iter().position(|arg| arg == "--preview") {
         return preview(args.get(i + 1).ok_or("Missing preview output path")?);
     }
-    let demo = args.iter().any(|arg| arg == "--demo");
+    log("APP", "starting with live NVR event monitoring");
     let config_path = match args.iter().position(|arg| arg == "--config") {
         Some(i) => args.get(i + 1).ok_or("Missing config path")?.as_str(),
         None => "config.local.json",
     };
     let mut window = Window::new(
-        if demo {
-            "Dahua Pager | Demo"
-        } else {
-            "Dahua Pager"
-        },
-        if demo { WIDTH as usize } else { WINDOW_WIDTH },
-        if demo { HEIGHT as usize } else { WINDOW_HEIGHT },
+        "Dahua Pager",
+        WINDOW_WIDTH,
+        WINDOW_HEIGHT,
         WindowOptions {
             scale: Scale::X1,
             ..WindowOptions::default()
@@ -243,45 +473,314 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut lcd_down = false;
     let mut left_was_down = false;
     let mut shell = Framebuffer::new(WINDOW_WIDTH, WINDOW_HEIGHT);
-    let mut audio = if demo { Some(Audio::new()?) } else { None };
-    let (subscription, initial_status, mut network_path, camera_client) = if demo {
-        (None, ConnectionStatus::Offline, None, None)
-    } else {
-        connect(config_path)
+    let mut audio = match Audio::new() {
+        Ok(audio) => {
+            log("AUDIO", "native output ready");
+            Some(audio)
+        }
+        Err(error) => {
+            log("AUDIO ERROR", format!("native output unavailable: {error}"));
+            None
+        }
     };
-    if !demo {
-        ui.set_cameras(Vec::new());
-    }
+    let (subscription, initial_status, mut network_path, camera_client, demo_mode) =
+        connect(config_path);
+    ui.set_cameras(initial_areas(config_path));
+    let saved_camera_count = Config::load(config_path)
+        .map(|config| config.cameras.len())
+        .unwrap_or(0);
+    let demo_camera_count = if saved_camera_count == 0 {
+        6
+    } else {
+        saved_camera_count.min(6)
+    };
     let mut camera_refresh = None;
     let mut snapshot_receiver: Option<(u32, Receiver<Result<Vec<Rgb565>, DahuaError>>)> = None;
+    let (alarm_snapshot_tx, alarm_snapshot_rx) = camera_client
+        .clone()
+        .map(start_alarm_snapshot_worker)
+        .map(|(tx, rx)| (Some(tx), Some(rx)))
+        .unwrap_or((None, None));
+    let mut seen_event_ids = std::collections::VecDeque::<(u32, u64)>::new();
+    let mut previous_connection_status = initial_status;
+    let mut previous_dropped_messages = 0;
+    let mut previous_sounding = pager.sounding();
     let clock = Instant::now();
+    let demo_alarm_deadline = Instant::now() + Duration::from_secs(15);
+    let mut demo_alarm_fired = false;
     'app: while window.is_open() {
         let now = clock.elapsed().as_millis() as u64;
         pager.tick(now);
-        // This stage exposes connectivity only. Detection/snapshot processing is next.
-        // Consume a bounded number per frame so traffic cannot stall input/rendering.
         if let (Some(subscription), Some(monitor)) = (&subscription, &mut network_path) {
             monitor.poll(subscription);
         }
         let status = if let Some(subscription) = &subscription {
-            for _ in subscription.messages.try_iter().take(64) {}
+            for message in subscription.messages.try_iter().take(64) {
+                let Message::Event(event) = message else {
+                    log("NVR", "heartbeat received");
+                    continue;
+                };
+                let event_id = event.data.get("EventID").and_then(|value| value.as_u64());
+                let event_time = event
+                    .data
+                    .get("LocaleTime")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("unknown-time");
+                log(
+                    "NVR EVENT",
+                    format!(
+                        "code={} action={} channel={} event_id={event_id:?} time={event_time}",
+                        event.code, event.action, event.channel
+                    ),
+                );
+                if demo_mode && event.code == "SmartMotionHuman" {
+                    log(
+                        "DEMO",
+                        format!(
+                            "live human event action={} observed but suppressed in demo_mode",
+                            event.action
+                        ),
+                    );
+                    continue;
+                }
+                let Some((rectangles, timestamp)) = human_detection(&event) else {
+                    if event.code == "SmartMotionHuman" {
+                        if event.action == "Start" {
+                            log(
+                                "DETECTION WARNING",
+                                "SmartMotionHuman Start had no valid timestamp/rectangle; ignored",
+                            );
+                        } else {
+                            log(
+                                "DETECTION",
+                                format!(
+                                    "SmartMotionHuman action={} does not create a new alarm",
+                                    event.action
+                                ),
+                            );
+                        }
+                    }
+                    continue;
+                };
+                if event.channel >= 6 {
+                    log(
+                        "DETECTION",
+                        format!("ignored human event: unsupported channel {}", event.channel),
+                    );
+                    continue;
+                }
+                if let Some(event_id) = event_id {
+                    let event_key = (event.channel, event_id);
+                    if seen_event_ids.contains(&event_key) {
+                        log(
+                            "DETECTION",
+                            format!(
+                                "ignored duplicate event_id={event_id} channel={}",
+                                event.channel
+                            ),
+                        );
+                        continue;
+                    }
+                    seen_event_ids.push_back(event_key);
+                    if seen_event_ids.len() > 512 {
+                        seen_event_ids.pop_front();
+                    }
+                }
+                let object_count = rectangles.len();
+                let Some(rect) = rectangles
+                    .into_iter()
+                    .find(|rect| ui.area_contains(event.channel as u8, *rect))
+                else {
+                    log(
+                        "DETECTION",
+                        format!(
+                            "human event ignored: no detected rectangle intersects saved area mask (channel={}, objects={})",
+                            event.channel, object_count
+                        ),
+                    );
+                    continue;
+                };
+                log(
+                    "DETECTION",
+                    format!(
+                        "human rectangle accepted channel={} rect=[{},{},{},{}] time={timestamp}",
+                        event.channel, rect.left, rect.top, rect.right, rect.bottom
+                    ),
+                );
+                if pager.mode == Mode::Disarmed {
+                    log("ALARM", "detection ignored because mode is DISARMED");
+                }
+                if let Some(sequence) =
+                    pager.detect_with_rectangle(event.channel as u8, now, Some(rect))
+                {
+                    let previous_screen = ui.screen;
+                    ui.sync_alarms(&pager);
+                    if previous_screen != ui.screen {
+                        log(
+                            "UI",
+                            format!("screen {previous_screen:?} -> {:?} (new alarm)", ui.screen),
+                        );
+                    }
+                    ui.set_alarm_timestamp(sequence, timestamp);
+                    if let Some(sender) = &alarm_snapshot_tx {
+                        if sender.try_send((sequence, event.channel + 1)).is_err() {
+                            log(
+                                "SNAPSHOT ERROR",
+                                format!("queue full; snapshot unavailable for alarm={sequence}"),
+                            );
+                            ui.set_alarm_snapshot(sequence, None);
+                        } else {
+                            log(
+                                "SNAPSHOT",
+                                format!("queued alarm={sequence} channel={}", event.channel + 1),
+                            );
+                        }
+                    } else {
+                        log(
+                            "SNAPSHOT",
+                            format!("no NVR client; alarm={sequence} has no snapshot"),
+                        );
+                        ui.set_alarm_snapshot(sequence, None);
+                    }
+                    log(
+                        "ALARM",
+                        format!(
+                            "created sequence={sequence} channel={} acknowledged=no mode={:?}",
+                            event.channel, pager.mode
+                        ),
+                    );
+                } else if pager.mode != Mode::Disarmed {
+                    log("ALARM", "alarm not created: queue full");
+                }
+            }
             connection_status(subscription)
         } else {
             initial_status
         };
+        if demo_mode && !demo_alarm_fired && Instant::now() >= demo_alarm_deadline {
+            demo_alarm_fired = true;
+            let mut rng = rand::thread_rng();
+            let camera = rng.gen_range(0..demo_camera_count) as u8;
+            let rectangle = random_demo_rectangle();
+            let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
+            log(
+                "DEMO",
+                format!(
+                    "firing one synthetic human alarm after 15 seconds: channel={camera}, rect=[{},{},{},{}]",
+                    rectangle.left, rectangle.top, rectangle.right, rectangle.bottom
+                ),
+            );
+            if let Some(sequence) = pager.detect_with_rectangle(camera, now, Some(rectangle)) {
+                let previous_screen = ui.screen;
+                ui.sync_alarms(&pager);
+                if previous_screen != ui.screen {
+                    log(
+                        "UI",
+                        format!("screen {previous_screen:?} -> {:?} (demo alarm)", ui.screen),
+                    );
+                }
+                ui.set_alarm_timestamp(sequence, timestamp);
+                if let Some(sender) = &alarm_snapshot_tx {
+                    if sender.try_send((sequence, camera as u32 + 1)).is_ok() {
+                        log(
+                            "SNAPSHOT",
+                            format!("queued demo alarm={sequence} channel={}", camera + 1),
+                        );
+                    } else {
+                        log("SNAPSHOT ERROR", "demo snapshot queue is full");
+                        ui.set_alarm_snapshot(sequence, None);
+                    }
+                } else {
+                    log("SNAPSHOT ERROR", "demo snapshot unavailable: no NVR client");
+                    ui.set_alarm_snapshot(sequence, None);
+                }
+                log(
+                    "ALARM",
+                    format!(
+                        "demo alarm created sequence={sequence} channel={camera} mode={:?}",
+                        pager.mode
+                    ),
+                );
+            } else {
+                log(
+                    "DEMO",
+                    format!("synthetic alarm was rejected in mode {:?}", pager.mode),
+                );
+            }
+        }
+        if status != previous_connection_status {
+            log(
+                "NVR STATUS",
+                format!("{previous_connection_status:?} -> {status:?}"),
+            );
+            previous_connection_status = status;
+        }
+        if let Some(subscription) = &subscription {
+            let dropped = subscription.dropped_messages();
+            if dropped != previous_dropped_messages {
+                log(
+                    "NVR WARNING",
+                    format!(
+                        "event queue dropped {} message(s); total={dropped}",
+                        dropped - previous_dropped_messages
+                    ),
+                );
+                previous_dropped_messages = dropped;
+            }
+        }
+        ui.sync_alarms(&pager);
+        if let Some(audio) = &mut audio {
+            audio.update(pager.sounding());
+        }
+        if previous_sounding != pager.sounding() {
+            log(
+                "AUDIO",
+                if pager.sounding() {
+                    "alarm sound started"
+                } else {
+                    "alarm sound stopped"
+                },
+            );
+            previous_sounding = pager.sounding();
+        }
+        if let Some(receiver) = &alarm_snapshot_rx {
+            while let Ok((sequence, result)) = receiver.try_recv() {
+                match result {
+                    Ok(image) => ui.set_alarm_snapshot(sequence, Some(image)),
+                    Err(error) => {
+                        log(
+                            "SNAPSHOT ERROR",
+                            format!("alarm={sequence} result failed: {error}"),
+                        );
+                        ui.set_alarm_snapshot(sequence, None);
+                    }
+                }
+            }
+        }
         finish_camera_refresh(&mut camera_refresh, &mut ui);
         if let Some((index, receiver)) = snapshot_receiver.as_ref() {
             match receiver.try_recv() {
                 Ok(Ok(image)) => {
+                    log(
+                        "SNAPSHOT",
+                        format!("Area Settings snapshot ready channel={index}"),
+                    );
                     ui.set_camera_image(*index, Some(image));
                     snapshot_receiver = None;
                 }
                 Ok(Err(error)) => {
-                    eprintln!("Camera snapshot failed: {error:?}");
+                    log(
+                        "SNAPSHOT ERROR",
+                        format!("Area Settings channel={index}: {error}"),
+                    );
                     ui.set_camera_image(*index, None);
                     snapshot_receiver = None;
                 }
                 Err(TryRecvError::Disconnected) => {
+                    log(
+                        "SNAPSHOT ERROR",
+                        format!("Area Settings worker disconnected channel={index}"),
+                    );
                     ui.set_camera_image(*index, None);
                     snapshot_receiver = None;
                 }
@@ -289,172 +788,161 @@ fn main() -> Result<(), Box<dyn Error>> {
             }
         }
         for key in window.get_keys_pressed(KeyRepeat::No) {
-            if !demo && ui.wake_if_asleep() {
+            if ui.wake_if_asleep() {
+                log("INPUT", format!("key={key:?}; LCD woke without action"));
                 device.cancel_press();
                 break;
             }
             if key == Key::Escape {
+                log("APP", "Escape pressed; shutting down");
                 break 'app;
             }
-            if demo {
-                match key {
-                    Key::Key1 => pager.detect(0, now),
-                    Key::Key2 => pager.detect(1, now),
-                    Key::Key3 => pager.detect(2, now),
-                    Key::Key4 => pager.detect(3, now),
-                    Key::Key5 => pager.detect(4, now),
-                    Key::Key6 => pager.detect(5, now),
-                    Key::Left => pager.navigate(false),
-                    Key::Right => pager.navigate(true),
-                    Key::S => pager.set_mode(Mode::Muted),
-                    Key::A => pager.acknowledge_all(),
-                    Key::C
-                        if pager
-                            .alarms
-                            .get(pager.selected)
-                            .is_some_and(|a| a.acknowledged) =>
-                    {
-                        pager.close()
-                    }
-                    Key::M => pager.set_mode(match pager.mode {
-                        Mode::Armed => Mode::Muted,
-                        Mode::Muted => Mode::Disarmed,
-                        Mode::Disarmed => Mode::Armed,
-                    }),
-                    _ => {}
-                }
-            } else {
-                match key {
-                    Key::Tab => ui.move_focus(
+            match key {
+                Key::Tab => {
+                    ui.move_focus(
                         !(window.is_key_down(Key::LeftShift)
                             || window.is_key_down(Key::RightShift)),
-                    ),
-                    Key::Down | Key::Right => ui.move_focus(true),
-                    Key::Up | Key::Left => ui.move_focus(false),
-                    Key::Enter | Key::Space => {
-                        if let Some(action) = ui.focused_action() {
-                            let previous_screen = ui.screen;
-                            ui.apply(action, &mut pager);
-                            if previous_screen == pager_ui::Screen::AreaCameras
-                                && ui.screen == pager_ui::Screen::AreaEditor
-                            {
-                                snapshot_receiver =
-                                    begin_selected_snapshot(camera_client.as_ref(), &mut ui);
-                            }
-                            if action == Action::SaveAreas {
-                                if save_area_masks(config_path, &ui).is_ok() {
-                                    ui.save_completed();
-                                } else {
-                                    ui.save_failed();
-                                }
+                    );
+                    log("INPUT", format!("focus -> {:?}", ui.focused_action()));
+                }
+                Key::Down | Key::Right => {
+                    ui.move_focus(true);
+                    log("INPUT", format!("focus -> {:?}", ui.focused_action()));
+                }
+                Key::Up | Key::Left => {
+                    ui.move_focus(false);
+                    log("INPUT", format!("focus -> {:?}", ui.focused_action()));
+                }
+                Key::Enter | Key::Space => {
+                    if let Some(action) = ui.focused_action() {
+                        let previous_screen = ui.screen;
+                        apply_ui_action(&mut ui, &mut pager, action);
+                        if previous_screen == pager_ui::Screen::AreaCameras
+                            && ui.screen == pager_ui::Screen::AreaEditor
+                        {
+                            snapshot_receiver =
+                                begin_selected_snapshot(camera_client.as_ref(), &mut ui);
+                        }
+                        if action == Action::SaveAreas {
+                            if save_area_masks(config_path, &ui).is_ok() {
+                                log("AREAS", "all camera masks saved to local configuration");
+                                ui.save_completed();
+                            } else {
+                                log("AREAS ERROR", "failed to save camera masks");
+                                ui.save_failed();
                             }
                         }
                     }
-                    Key::S => ui.apply(Action::Sleep, &mut pager),
-                    Key::M => ui.apply(Action::CycleMode, &mut pager),
-                    Key::H => ui.apply(Action::History, &mut pager),
-                    Key::T => ui.apply(Action::Settings, &mut pager),
-                    Key::Backspace | Key::C => ui.apply(Action::Back, &mut pager),
-                    _ => {}
+                }
+                Key::S => apply_ui_action(&mut ui, &mut pager, Action::Sleep),
+                Key::M => apply_ui_action(&mut ui, &mut pager, Action::CycleMode),
+                Key::H => apply_ui_action(&mut ui, &mut pager, Action::History),
+                Key::T => apply_ui_action(&mut ui, &mut pager, Action::Settings),
+                Key::Backspace | Key::C => apply_ui_action(&mut ui, &mut pager, Action::Back),
+                _ => {}
+            }
+        }
+        // minifb already returns logical, scale-adjusted coordinates.
+        let point = window
+            .get_mouse_pos(MouseMode::Discard)
+            .map(|(x, y)| Point::new(x.floor() as i32, y.floor() as i32));
+        window.set_cursor_style(if point.and_then(|p| device.hit_test(&ui, p)).is_some() {
+            CursorStyle::OpenHand
+        } else {
+            CursorStyle::Arrow
+        });
+        if let Some(action) = device.pointer(&ui, window.get_mouse_down(MouseButton::Left), point) {
+            let previous_screen = ui.screen;
+            apply_ui_action(&mut ui, &mut pager, action);
+            if previous_screen == pager_ui::Screen::AreaCameras
+                && ui.screen == pager_ui::Screen::AreaEditor
+            {
+                snapshot_receiver = begin_selected_snapshot(camera_client.as_ref(), &mut ui);
+            }
+            if action == Action::SaveAreas {
+                if save_area_masks(config_path, &ui).is_ok() {
+                    log("AREAS", "all camera masks saved to local configuration");
+                    ui.save_completed();
+                } else {
+                    log("AREAS ERROR", "failed to save camera masks");
+                    ui.save_failed();
                 }
             }
         }
-        if demo {
-            if let Some(audio) = &mut audio {
-                audio.update(pager.sounding());
+        let mouse_down = window.get_mouse_down(MouseButton::Left);
+        if mouse_down {
+            if ui.screen == pager_ui::Screen::AreaEditor {
+                if let Some(point) = point {
+                    let lcd_point = point - device::LCD_ORIGIN;
+                    if left_was_down {
+                        ui.continue_area_paint(lcd_point);
+                    } else {
+                        ui.begin_area_paint(lcd_point);
+                        log(
+                            "AREAS",
+                            format!(
+                                "paint gesture started camera_position={}",
+                                ui.selected_camera() + 1
+                            ),
+                        );
+                    }
+                }
             }
-            pager_ui::render_demo(&mut frame, &pager)?;
-        } else {
-            // minifb already returns logical, scale-adjusted coordinates.
-            let point = window
-                .get_mouse_pos(MouseMode::Discard)
-                .map(|(x, y)| Point::new(x.floor() as i32, y.floor() as i32));
-            window.set_cursor_style(if point.and_then(|p| device.hit_test(&ui, p)).is_some() {
-                CursorStyle::OpenHand
-            } else {
-                CursorStyle::Arrow
+            lcd_down = point.is_some_and(|p| {
+                p.x >= device::LCD_ORIGIN.x
+                    && p.x < device::LCD_ORIGIN.x + WIDTH as i32
+                    && p.y >= device::LCD_ORIGIN.y
+                    && p.y < device::LCD_ORIGIN.y + HEIGHT as i32
             });
-            if let Some(action) =
-                device.pointer(&ui, window.get_mouse_down(MouseButton::Left), point)
-            {
+            left_was_down = true;
+        } else if lcd_down {
+            if left_was_down {
+                ui.end_area_paint();
+                if ui.screen == pager_ui::Screen::AreaEditor {
+                    log("AREAS", "paint gesture ended");
+                }
+            }
+            left_was_down = false;
+            if let Some(p) = point {
+                let lcd_point = p - device::LCD_ORIGIN;
                 let previous_screen = ui.screen;
-                ui.apply(action, &mut pager);
+                if ui.screen != pager_ui::Screen::AreaEditor {
+                    if ui.lcd_click(lcd_point, &mut pager) {
+                        log(
+                            "UI",
+                            format!("LCD click opened {:?} -> {:?}", previous_screen, ui.screen),
+                        );
+                    }
+                }
+                if previous_screen == pager_ui::Screen::Settings
+                    && ui.screen == pager_ui::Screen::AreaCameras
+                {
+                    log("UI", "Area Settings selected; refreshing camera list now");
+                    ui.begin_camera_refresh();
+                    if camera_refresh.is_none() {
+                        camera_refresh = refresh_cameras(camera_client.as_ref(), config_path);
+                    }
+                    if camera_client.is_none() {
+                        ui.fail_camera_refresh();
+                    }
+                }
                 if previous_screen == pager_ui::Screen::AreaCameras
                     && ui.screen == pager_ui::Screen::AreaEditor
                 {
                     snapshot_receiver = begin_selected_snapshot(camera_client.as_ref(), &mut ui);
                 }
-                if action == Action::SaveAreas {
-                    if save_area_masks(config_path, &ui).is_ok() {
-                        ui.save_completed();
-                    } else {
-                        ui.save_failed();
-                    }
-                }
             }
-            let mouse_down = window.get_mouse_down(MouseButton::Left);
-            if mouse_down {
-                if ui.screen == pager_ui::Screen::AreaEditor {
-                    if let Some(point) = point {
-                        let lcd_point = point - device::LCD_ORIGIN;
-                        if left_was_down {
-                            ui.continue_area_paint(lcd_point);
-                        } else {
-                            ui.begin_area_paint(lcd_point);
-                        }
-                    }
-                }
-                lcd_down = point.is_some_and(|p| {
-                    p.x >= device::LCD_ORIGIN.x
-                        && p.x < device::LCD_ORIGIN.x + WIDTH as i32
-                        && p.y >= device::LCD_ORIGIN.y
-                        && p.y < device::LCD_ORIGIN.y + HEIGHT as i32
-                });
-                left_was_down = true;
-            } else if lcd_down {
-                if left_was_down {
-                    ui.end_area_paint();
-                }
-                left_was_down = false;
-                if let Some(p) = point {
-                    let lcd_point = p - device::LCD_ORIGIN;
-                    let previous_screen = ui.screen;
-                    if ui.screen != pager_ui::Screen::AreaEditor {
-                        ui.lcd_click(lcd_point, &mut pager);
-                    }
-                    if previous_screen == pager_ui::Screen::Settings
-                        && ui.screen == pager_ui::Screen::AreaCameras
-                    {
-                        ui.begin_camera_refresh();
-                        if camera_refresh.is_none() {
-                            camera_refresh = refresh_cameras(camera_client.as_ref(), config_path);
-                        }
-                        if camera_client.is_none() {
-                            ui.fail_camera_refresh();
-                        }
-                    }
-                    if previous_screen == pager_ui::Screen::AreaCameras
-                        && ui.screen == pager_ui::Screen::AreaEditor
-                    {
-                        snapshot_receiver =
-                            begin_selected_snapshot(camera_client.as_ref(), &mut ui);
-                    }
-                }
-                lcd_down = false;
-            } else if left_was_down {
-                ui.end_area_paint();
-                left_was_down = false;
-            }
-            let time = chrono::Local::now().format("%H:%M").to_string();
-            ui.render(&mut frame, &pager, status, &time)?;
+            lcd_down = false;
+        } else if left_was_down {
+            ui.end_area_paint();
+            left_was_down = false;
         }
-        if demo {
-            window.update_with_buffer(&frame.pixels, WIDTH as usize, HEIGHT as usize)?;
-        } else {
-            device.render(&mut shell, &frame, &ui);
-            window.update_with_buffer(&shell.pixels, WINDOW_WIDTH, WINDOW_HEIGHT)?;
-        }
+        let time = chrono::Local::now().format("%H:%M").to_string();
+        ui.render(&mut frame, &pager, status, &time)?;
+        device.render(&mut shell, &frame, &ui);
+        window.update_with_buffer(&shell.pixels, WINDOW_WIDTH, WINDOW_HEIGHT)?;
     }
+    log("APP", "window closed; shutdown complete");
     Ok(())
 }
 
@@ -483,6 +971,57 @@ mod status_tests {
     #[test]
     fn invalid_jpeg_is_rejected_instead_of_becoming_an_empty_preview() {
         assert!(decode_snapshot(b"not a jpeg").is_none());
+    }
+
+    #[test]
+    fn smart_motion_human_start_extracts_the_4k_camera_rectangle() {
+        let event = Event {
+            code: "SmartMotionHuman".into(),
+            action: "Start".into(),
+            channel: 2,
+            data: serde_json::json!({
+                "LocaleTime": "2026-10-28 19:38:27",
+                "EventID": 131527,
+                "object": [{"HumamID": 82251, "Rect": [3232, 1792, 4024, 4608]}]
+            }),
+        };
+        let (rectangles, timestamp) = human_detection(&event).unwrap();
+        assert_eq!(
+            rectangles,
+            vec![AlarmRectangle {
+                left: 3232,
+                top: 1792,
+                right: 4024,
+                bottom: 4608
+            }]
+        );
+        assert_eq!(timestamp, "2026-10-28 19:38:27");
+    }
+
+    #[test]
+    fn human_stop_and_invalid_geometry_do_not_create_alarm_detections() {
+        let mut event = Event {
+            code: "SmartMotionHuman".into(),
+            action: "Stop".into(),
+            channel: 2,
+            data: serde_json::json!({
+                "LocaleTime": "2026-10-28 19:38:37",
+                "object": [{"Rect": [2856, 6144, 3848, 8096]}]
+            }),
+        };
+        assert!(human_detection(&event).is_none());
+        event.action = "Start".into();
+        event.data["object"][0]["Rect"] = serde_json::json!([8000, 100, 8200, 200]);
+        assert!(human_detection(&event).is_none());
+    }
+
+    #[test]
+    fn demo_person_rectangle_stays_inside_nvr_coordinate_plane() {
+        for _ in 0..100 {
+            let rect = random_demo_rectangle();
+            assert!(rect.left < rect.right && rect.top < rect.bottom);
+            assert!(rect.right <= 8192 && rect.bottom <= 8192);
+        }
     }
 
     #[test]

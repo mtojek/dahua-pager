@@ -9,5 +9,6 @@
     "session_timeout_secs": 60,
     "tls_insecure": false
   },
-  "cameras": []
+  "cameras": [],
+  "demo_mode": false
 }

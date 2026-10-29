@@ -1313,7 +1313,9 @@ dependencies = [
  "pager-core",
  "pager-dahua",
  "pager-ui",
+ "rand 0.8.8",
  "rodio",
+ "serde_json",
  "system-configuration",
 ]
 

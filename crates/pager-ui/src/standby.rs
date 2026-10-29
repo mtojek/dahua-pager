@@ -8,7 +8,8 @@ use embedded_graphics::{
     primitives::{Circle, PrimitiveStyle, Rectangle},
     text::{Alignment, Text},
 };
-use pager_core::{Mode, Pager};
+use pager_core::{Alarm, Mode, Pager};
+use std::collections::BTreeMap;
 
 pub const AREA_COLUMNS: usize = 32;
 pub const AREA_ROWS: usize = 20;
@@ -31,6 +32,7 @@ pub enum Screen {
     Settings,
     AreaCameras,
     AreaEditor,
+    Alarm,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Action {
@@ -47,6 +49,7 @@ pub enum Action {
     PreviousCamera,
     NextCamera,
     SaveAreas,
+    Acknowledge,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ConnectionStatus {
@@ -114,12 +117,26 @@ pub struct Ui {
     focus: Option<Action>,
     asleep: bool,
     cameras: Vec<AreaCamera>,
+    detection_masks: Vec<[[bool; AREA_COLUMNS]; AREA_ROWS]>,
     selected_camera: usize,
     camera_loading: bool,
     camera_load_error: bool,
     save_error: bool,
     area_paint_value: Option<bool>,
     last_painted_cell: Option<(usize, usize)>,
+    return_screen: Screen,
+    alarm_presentations: BTreeMap<u64, AlarmPresentation>,
+    alarm_acknowledged: bool,
+    alarm_count: usize,
+}
+
+#[derive(Clone, Debug)]
+pub struct AlarmPresentation {
+    pub camera_name: String,
+    pub timestamp: String,
+    pub image: Option<Vec<Rgb565>>,
+    pub snapshot_loading: bool,
+    pub snapshot_error: bool,
 }
 impl Default for Ui {
     fn default() -> Self {
@@ -135,12 +152,17 @@ impl Default for Ui {
                 AreaCamera::new(5, "Driveway"),
                 AreaCamera::new(6, "Entrance"),
             ],
+            detection_masks: vec![[[false; AREA_COLUMNS]; AREA_ROWS]; 6],
             selected_camera: 0,
             camera_loading: false,
             camera_load_error: false,
             save_error: false,
             area_paint_value: None,
             last_painted_cell: None,
+            return_screen: Screen::Standby,
+            alarm_presentations: BTreeMap::new(),
+            alarm_acknowledged: false,
+            alarm_count: 0,
         }
     }
 }
@@ -157,6 +179,16 @@ impl Ui {
             return [Some(Action::Wake); 4];
         }
         match self.screen {
+            Screen::Alarm => [
+                (self.alarm_count > 1).then_some(Action::Previous),
+                (self.alarm_count > 1).then_some(Action::Next),
+                Some(if self.alarm_acknowledged {
+                    Action::Back
+                } else {
+                    Action::Acknowledge
+                }),
+                None,
+            ],
             Screen::Standby => MAIN_ACTIONS.map(Some),
             Screen::History => [
                 Some(Action::Previous),
@@ -215,6 +247,10 @@ impl Ui {
             return;
         }
         match action {
+            Action::Acknowledge => {
+                pager.acknowledge_all();
+                self.alarm_acknowledged = true;
+            }
             Action::Sleep => {
                 self.asleep = true;
                 self.focus = None;
@@ -258,6 +294,7 @@ impl Ui {
             Action::SaveAreas => {}
             Action::Back => {
                 self.screen = match self.screen {
+                    Screen::Alarm => self.return_screen,
                     Screen::AreaEditor => Screen::AreaCameras,
                     Screen::AreaCameras => Screen::Settings,
                     _ => Screen::Standby,
@@ -272,7 +309,78 @@ impl Ui {
         &self.cameras
     }
 
+    pub fn sync_alarms(&mut self, pager: &Pager) {
+        self.alarm_count = pager.alarms.len();
+        for alarm in &pager.alarms {
+            let camera_name = self
+                .cameras
+                .get(alarm.camera as usize)
+                .map(|camera| camera.name.clone())
+                .unwrap_or_else(|| format!("Camera {}", alarm.camera + 1));
+            let presentation =
+                self.alarm_presentations
+                    .entry(alarm.sequence)
+                    .or_insert(AlarmPresentation {
+                        camera_name,
+                        timestamp: String::new(),
+                        image: None,
+                        snapshot_loading: true,
+                        snapshot_error: false,
+                    });
+            if let Some(camera) = self.cameras.get(alarm.camera as usize) {
+                presentation.camera_name.clone_from(&camera.name);
+            }
+        }
+        if pager.alarms.iter().any(|alarm| !alarm.acknowledged) {
+            if self.screen != Screen::Alarm {
+                self.return_screen = self.screen;
+                self.screen = Screen::Alarm;
+                self.focus = None;
+            }
+            self.alarm_acknowledged = false;
+        } else if self.screen == Screen::Alarm {
+            self.alarm_acknowledged = true;
+        }
+    }
+
+    pub fn set_alarm_snapshot(&mut self, sequence: u64, image: Option<Vec<Rgb565>>) {
+        if let Some(presentation) = self.alarm_presentations.get_mut(&sequence) {
+            presentation.snapshot_loading = false;
+            presentation.snapshot_error = image.is_none();
+            presentation.image = image;
+        }
+    }
+
+    pub fn alarm_presentation(&self, sequence: u64) -> Option<&AlarmPresentation> {
+        self.alarm_presentations.get(&sequence)
+    }
+
+    pub fn set_alarm_timestamp(&mut self, sequence: u64, timestamp: String) {
+        if let Some(presentation) = self.alarm_presentations.get_mut(&sequence) {
+            presentation.timestamp = timestamp;
+        }
+    }
+
+    pub fn area_contains(&self, camera: u8, rect: pager_core::Rectangle) -> bool {
+        let Some(mask) = self.detection_masks.get(camera as usize) else {
+            return false;
+        };
+        if rect.left >= rect.right || rect.top >= rect.bottom {
+            return false;
+        }
+        mask.iter().enumerate().any(|(row, cells)| {
+            cells.iter().enumerate().any(|(col, selected)| {
+                *selected
+                    && (rect.left as u32) < (col + 1) as u32 * 8192 / AREA_COLUMNS as u32
+                    && (rect.right as u32) > col as u32 * 8192 / AREA_COLUMNS as u32
+                    && (rect.top as u32) < (row + 1) as u32 * 8192 / AREA_ROWS as u32
+                    && (rect.bottom as u32) > row as u32 * 8192 / AREA_ROWS as u32
+            })
+        })
+    }
+
     pub fn set_cameras(&mut self, cameras: Vec<AreaCamera>) {
+        self.detection_masks = cameras.iter().map(|camera| camera.mask).collect();
         self.cameras = cameras;
         self.camera_loading = false;
         self.camera_load_error = false;
@@ -284,6 +392,7 @@ impl Ui {
     }
 
     pub fn begin_camera_refresh(&mut self) {
+        self.detection_masks = self.cameras.iter().map(|camera| camera.mask).collect();
         self.cameras.clear();
         self.camera_loading = true;
         self.camera_load_error = false;
@@ -314,6 +423,7 @@ impl Ui {
     }
 
     pub fn save_completed(&mut self) {
+        self.detection_masks = self.cameras.iter().map(|camera| camera.mask).collect();
         self.screen = Screen::AreaCameras;
         self.focus = None;
         self.save_error = false;
@@ -422,10 +532,14 @@ impl Ui {
             return Ok(());
         }
         display.clear(BACKGROUND)?;
-        let bar_color = match pager.mode {
-            Mode::Armed => Rgb565::new(14, 9, 5),
-            Mode::Muted => Rgb565::new(15, 21, 3),
-            Mode::Disarmed => Rgb565::new(4, 23, 7),
+        let bar_color = if self.screen == Screen::Alarm {
+            Rgb565::new(31, 5, 3)
+        } else {
+            match pager.mode {
+                Mode::Armed => Rgb565::new(14, 9, 5),
+                Mode::Muted => Rgb565::new(15, 21, 3),
+                Mode::Disarmed => Rgb565::new(4, 23, 7),
+            }
         };
         Rectangle::new(Point::zero(), Size::new(480, 24))
             .into_styled(PrimitiveStyle::with_fill(bar_color))
@@ -433,10 +547,14 @@ impl Ui {
         Rectangle::new(Point::new(0, 24), Size::new(480, 1))
             .into_styled(PrimitiveStyle::with_fill(BORDER))
             .draw(display)?;
-        let mode = match pager.mode {
-            Mode::Armed => "ARMED",
-            Mode::Muted => "MUTED",
-            Mode::Disarmed => "DISARMED",
+        let mode = if self.screen == Screen::Alarm {
+            "ALARM"
+        } else {
+            match pager.mode {
+                Mode::Armed => "ARMED",
+                Mode::Muted => "MUTED",
+                Mode::Disarmed => "DISARMED",
+            }
         };
         Text::new(
             mode,
@@ -462,6 +580,7 @@ impl Ui {
         } else {
             Text::with_alignment(
                 match self.screen {
+                    Screen::Alarm => "HUMAN DETECTED",
                     Screen::History => "HISTORY",
                     Screen::Settings => "SETTINGS",
                     Screen::AreaCameras => "AREA SETTINGS",
@@ -473,7 +592,19 @@ impl Ui {
                 Alignment::Center,
             )
             .draw(display)?;
-            if self.screen == Screen::Settings {
+            if self.screen == Screen::Alarm {
+                if let Some(alarm) = pager.alarms.get(pager.selected) {
+                    render_alarm(display, self, alarm)?;
+                } else {
+                    text(
+                        display,
+                        "No alarm details",
+                        Point::new(240, 160),
+                        Alignment::Center,
+                        SECONDARY,
+                    )?;
+                }
+            } else if self.screen == Screen::Settings {
                 render_settings(display)?;
             } else if self.screen == Screen::AreaCameras {
                 render_area_cameras(display, self)?;
@@ -509,6 +640,7 @@ impl Ui {
             Action::Previous | Action::PreviousCamera => "Prev",
             Action::Next | Action::NextCamera => "Next",
             Action::SaveAreas => "Save",
+            Action::Acknowledge => "ACK",
         }
     }
 }
@@ -551,6 +683,52 @@ fn render_button_legend<D: DrawTarget<Color = Rgb565>>(
             )?;
             left += 14 + caption.len() as i32 * 9 + 16;
         }
+    }
+    Ok(())
+}
+
+fn render_alarm<D: DrawTarget<Color = Rgb565>>(
+    display: &mut D,
+    ui: &Ui,
+    alarm: &Alarm,
+) -> Result<(), D::Error> {
+    let presentation = ui.alarm_presentation(alarm.sequence);
+    if let Some(image) = presentation.and_then(|p| p.image.as_ref()) {
+        for y in 0..AREA_IMAGE_HEIGHT as usize {
+            for x in 0..AREA_IMAGE_WIDTH as usize {
+                Pixel(
+                    Point::new(16 + x as i32, 36 + y as i32),
+                    image[y * AREA_IMAGE_WIDTH as usize + x],
+                )
+                .draw(display)?;
+            }
+        }
+        if let Some(rect) = alarm.rectangle {
+            let x = |value: u16| 16 + (value as u32 * AREA_IMAGE_WIDTH / 8192) as i32;
+            let y = |value: u16| 36 + (value as u32 * AREA_IMAGE_HEIGHT / 8192) as i32;
+            Rectangle::new(
+                Point::new(x(rect.left), y(rect.top)),
+                Size::new(
+                    ((rect.right - rect.left) as u32 * AREA_IMAGE_WIDTH / 8192).max(1),
+                    ((rect.bottom - rect.top) as u32 * AREA_IMAGE_HEIGHT / 8192).max(1),
+                ),
+            )
+            .into_styled(PrimitiveStyle::with_stroke(Rgb565::new(31, 8, 4), 2))
+            .draw(display)?;
+        }
+    } else {
+        let message = match presentation {
+            Some(p) if p.snapshot_loading => "Loading snapshot...",
+            Some(p) if p.snapshot_error => "Snapshot unavailable",
+            _ => "Snapshot unavailable",
+        };
+        text(
+            display,
+            message,
+            Point::new(240, 150),
+            Alignment::Center,
+            SECONDARY,
+        )?;
     }
     Ok(())
 }
@@ -781,6 +959,62 @@ mod tests {
         ui.apply(Action::Back, &mut pager);
         ui.apply(Action::Settings, &mut pager);
         assert_eq!(ui.screen, Screen::Settings);
+    }
+
+    #[test]
+    fn human_rectangle_intersects_selected_mask_and_mask_survives_camera_refresh() {
+        let mut ui = Ui::default();
+        ui.cameras[0].mask[0][0] = true;
+        let cameras = ui.cameras.clone();
+        ui.set_cameras(cameras);
+        let inside = pager_core::Rectangle {
+            left: 0,
+            top: 0,
+            right: 100,
+            bottom: 100,
+        };
+        let outside = pager_core::Rectangle {
+            left: 8000,
+            top: 8000,
+            right: 8192,
+            bottom: 8192,
+        };
+        assert!(ui.area_contains(0, inside));
+        assert!(!ui.area_contains(0, outside));
+        ui.begin_camera_refresh();
+        assert!(ui.area_contains(0, inside));
+    }
+
+    #[test]
+    fn alarm_acknowledges_all_without_leaving_until_back() {
+        let mut ui = Ui::default();
+        let mut pager = Pager::default();
+        pager.detect_with_rectangle(0, 10, None);
+        pager.detect_with_rectangle(1, 11, None);
+        ui.screen = Screen::History;
+        ui.sync_alarms(&pager);
+        assert_eq!(ui.screen, Screen::Alarm);
+        assert_eq!(ui.physical_actions()[2], Some(Action::Acknowledge));
+        ui.apply(Action::Acknowledge, &mut pager);
+        ui.sync_alarms(&pager);
+        assert!(pager.alarms.iter().all(|alarm| alarm.acknowledged));
+        assert!(!pager.sounding());
+        assert_eq!(ui.screen, Screen::Alarm);
+        assert_eq!(ui.physical_actions()[2], Some(Action::Back));
+        ui.apply(Action::Back, &mut pager);
+        assert_eq!(ui.screen, Screen::History);
+    }
+
+    #[test]
+    fn alarm_hides_previous_and_next_when_there_is_only_one_record() {
+        let mut ui = Ui::default();
+        let mut pager = Pager::default();
+        pager.detect_with_rectangle(0, 10, None);
+        ui.sync_alarms(&pager);
+        assert_eq!(
+            ui.physical_actions(),
+            [None, None, Some(Action::Acknowledge), None]
+        );
     }
     #[test]
     fn keyboard_focus_wraps_between_physical_actions() {

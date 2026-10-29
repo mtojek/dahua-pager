@@ -3,15 +3,14 @@
 Design for the 480 × 320 ILI9488 display. The macOS simulator uses scale 1:1;
 the additional case area holds physical controls outside the LCD. Mouse input
 stands in for touch. These documents describe the target UI.
-Standby and the macOS Area Settings camera list/editor are implemented. History
-is still a placeholder; alarm handling and scheduling remain planned.
+Standby, Alarm, and the macOS Area Settings camera list/editor are implemented.
+History is still a placeholder; scheduling remains planned.
 
 **Do not recreate `screens.md`.** Keep the screen backlog in this file.
 
 ## Screens still to implement
 
 - **History:** browse saved detections with their snapshots and marked rectangles; Prev/Next changes the selected record, Back returns.
-- **Alarm:** show the active alarm snapshot and marked rectangle; ACK confirms all alarms received up to that moment, then Back returns.
 - **Schedule editor:** configure weekly ARMED / MUTED / DISARMED periods. See [schedule.md](schedule.md) for the current proposal.
 - **ESP32 port:** bring the working macOS Area Settings camera list and mask editor to the device UI, including physical-button navigation and the LCD legend.
 
@@ -19,6 +18,13 @@ Standby, Settings menu, and the macOS Area Settings flow are already implemented
 do not list them as new screens to create.
 
 - [Implementation plan](../../PLAN.md): stages, hardware and integration work.
+
+## Alarm screen
+
+The Mac app opens Alarm for accepted `SmartMotionHuman` Start events whose
+rectangle intersects the saved area mask. It displays the NVR snapshot with
+the detected rectangle, camera name when discovered, and event time. Stop events
+do not create alarms. Snapshot capture is asynchronous and bounded.
 
 ## Modes and acknowledgement
 

@@ -14,8 +14,17 @@ pub struct Alarm {
     pub sequence: u64,
     pub camera: u8,
     pub started_ms: u64,
+    pub rectangle: Option<Rectangle>,
     pub acknowledged: bool,
     sound_requested: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Rectangle {
+    pub left: u16,
+    pub top: u16,
+    pub right: u16,
+    pub bottom: u16,
 }
 
 pub struct Pager {
@@ -41,15 +50,24 @@ impl Default for Pager {
 }
 
 impl Pager {
-    /// Demo input: every call represents a distinct detection, not an NVR update.
+    /// Record a detection when the caller has no rectangle geometry.
     pub fn detect(&mut self, camera: u8, now: u64) {
+        let _ = self.detect_with_rectangle(camera, now, None);
+    }
+
+    pub fn detect_with_rectangle(
+        &mut self,
+        camera: u8,
+        now: u64,
+        rectangle: Option<Rectangle>,
+    ) -> Option<u64> {
         self.tick(now);
         if self.mode == Mode::Disarmed || camera >= 6 {
-            return;
+            return None;
         }
         if self.alarms.len() == QUEUE_LIMIT {
             self.overflow += 1;
-            return;
+            return None;
         }
         self.sequence += 1;
         let sound_requested = self.mode == Mode::Armed;
@@ -57,12 +75,14 @@ impl Pager {
             sequence: self.sequence,
             camera,
             started_ms: now,
+            rectangle,
             acknowledged: false,
             sound_requested,
         });
         if sound_requested && self.audio_start.is_none() {
             self.audio_start = Some(now);
         }
+        Some(self.sequence)
     }
 
     pub fn tick(&mut self, now: u64) {

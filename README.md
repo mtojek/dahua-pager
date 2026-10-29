@@ -3,10 +3,9 @@
 Alarm pager for Dahua NVRs, written in Rust. macOS first, ESP32-S3 later.
 
 The NVR client supports Digest authentication, camera discovery, snapshots and
-reconnecting event streams. The desktop UI has a standby screen with live NVR
-connection status. macOS route changes cancel stale connections; 15 seconds
-without valid messages also triggers reconnect. Real detection/snapshot handling
-in the UI comes next.
+reconnecting event streams. The desktop UI shows live connection status and
+opens an alarm view for accepted human-detection events. macOS route changes
+cancel stale connections; 15 seconds without valid messages triggers reconnect.
 
 ## Run
 
@@ -14,20 +13,29 @@ in the UI comes next.
 cargo run -p pager-macos
 ```
 
+Runtime diagnostics are printed to the terminal with timestamps. They include
+NVR connection changes, event handling, alarm and snapshot activity, and UI
+actions; credentials, host addresses and camera names are omitted.
+
 Click the physical buttons, or use **Tab/arrows + Enter**. Red/**S** sleeps the
 LCD; blue/**M** cycles ARMED → MUTED → DISARMED. Any button/key wakes the LCD
 without also acting. **H** opens History, **T** opens Settings, **Backspace**
 returns, **Esc** exits when awake.
 
-The earlier synthetic alarm demo is available with `cargo run -p pager-macos -- --demo`.
-In the demo: **1–6** trigger alarms, **←/→** browse, **A** acknowledges all,
-**S** sets MUTED, **C** dismisses an acknowledged alarm, **M** changes mode.
-
 ## Connect to an NVR
 
 Copy `config.example.json` to `config.local.json` and fill in the address and
 credentials. Set `tls_insecure: true` for self-signed certificates (`curl -k`).
-Camera numbers and names come from the NVR.
+Camera IDs come from the NVR's unique `Name` values. Area Settings saves each ID
+beside its mask in `config.local.json`; IP addresses and channel indexes stay
+out of the config.
+
+To exercise the alarm screen, set the top-level `demo_mode` field in
+`config.local.json` to `true`. After 15 seconds the app chooses a random channel
+and draws a random person rectangle over that channel's live NVR snapshot. The
+demo event is synthetic; the image is fetched from the real NVR. Live human
+events are suppressed while demo mode is on. Set it back to `false` for normal
+operation.
 
 ```sh
 # Watch events; reconnect automatically

@@ -3,6 +3,9 @@ use std::{error::Error, num::NonZeroU16, num::NonZeroU32};
 
 const SAMPLE_RATE: u32 = 22_050;
 const CYCLE_SECONDS: u32 = 3;
+const TONE_HZ: f32 = 880.0;
+const PEAK_LEVEL: f32 = 0.32;
+const EDGE_SECONDS: f32 = 0.02;
 
 /// In-process playback through rodio/CPAL and the native CoreAudio backend.
 pub struct Audio {
@@ -48,11 +51,11 @@ fn pager_samples() -> Vec<f32> {
             let t = i as f32 / SAMPLE_RATE as f32;
             let phase = t % 0.3;
             let envelope = if t < 0.9 && phase < 0.18 {
-                (phase / 0.01).min(1.0) * ((0.18 - phase) / 0.01).min(1.0)
+                (phase / EDGE_SECONDS).min(1.0) * ((0.18 - phase) / EDGE_SECONDS).min(1.0)
             } else {
                 0.0
             };
-            (t * 1800.0 * std::f32::consts::TAU).sin() * envelope * 0.43
+            (t * TONE_HZ * std::f32::consts::TAU).sin() * envelope * PEAK_LEVEL
         })
         .collect()
 }
@@ -64,11 +67,15 @@ mod tests {
     fn pager_pattern_has_three_bursts_and_a_long_pause_without_clipping() {
         let samples = pager_samples();
         assert_eq!(samples.len(), (SAMPLE_RATE * CYCLE_SECONDS) as usize);
-        assert!(samples.iter().all(|s| s.is_finite() && s.abs() <= 0.43));
+        assert!(
+            samples
+                .iter()
+                .all(|s| s.is_finite() && s.abs() <= PEAK_LEVEL)
+        );
         for (start, end) in [(0.0, 0.18), (0.3, 0.48), (0.6, 0.78)] {
             let burst = &samples
                 [(start * SAMPLE_RATE as f32) as usize..(end * SAMPLE_RATE as f32) as usize];
-            assert!(burst.iter().any(|s| s.abs() > 0.3));
+            assert!(burst.iter().any(|s| s.abs() > 0.2));
         }
         assert!(samples[SAMPLE_RATE as usize..].iter().all(|s| *s == 0.0));
     }

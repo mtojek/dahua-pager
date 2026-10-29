@@ -54,6 +54,8 @@ pub struct Config {
     pub schema_version: u32,
     pub nvr: NvrConfig,
     pub cameras: Vec<CameraSettings>,
+    #[serde(default)]
+    pub demo_mode: bool,
 }
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -85,16 +87,21 @@ impl Camera {
     }
 }
 
-/// Persisted, positional camera settings. The 640 row-major mask bits are packed
-/// LSB-first into 80 bytes and stored as a hex string. Runtime camera
-/// identity and IP address are discovered from the NVR and are not serialized.
+/// Persisted camera identity and area settings. `camera_id` comes from the
+/// NVR's unique Name field; channel index and IP address remain runtime-only.
+/// The 640 row-major mask bits are packed LSB-first into 80 bytes as hex.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct CameraSettings {
+    pub camera_id: String,
     pub area_mask: String,
 }
 
 impl CameraSettings {
     pub fn from_mask(mask: &[bool]) -> Result<Self> {
+        Self::identified("", mask)
+    }
+
+    pub fn identified(camera_id: impl Into<String>, mask: &[bool]) -> Result<Self> {
         if mask.len() != AREA_MASK_BITS {
             return Err(Error::Config);
         }
@@ -110,7 +117,10 @@ impl CameraSettings {
             area_mask.push(HEX[(byte >> 4) as usize] as char);
             area_mask.push(HEX[(byte & 0x0f) as usize] as char);
         }
-        Ok(Self { area_mask })
+        Ok(Self {
+            camera_id: camera_id.into(),
+            area_mask,
+        })
     }
 
     pub fn decode_mask(&self) -> Result<Vec<bool>> {
@@ -133,6 +143,8 @@ impl CameraSettings {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CameraSettingsInput {
+    #[serde(default)]
+    camera_id: String,
     area_mask: String,
 }
 
@@ -143,6 +155,7 @@ impl<'de> Deserialize<'de> for CameraSettings {
     {
         let input = CameraSettingsInput::deserialize(deserializer)?;
         let settings = Self {
+            camera_id: input.camera_id,
             area_mask: input.area_mask,
         };
         settings.decode_mask().map_err(serde::de::Error::custom)?;
@@ -182,6 +195,7 @@ impl Config {
             schema_version: current.schema_version,
             nvr: current.nvr,
             cameras: cameras.to_vec(),
+            demo_mode: current.demo_mode,
         };
         let encoded = serde_json::to_vec_pretty(&updated).map_err(|_| Error::Config)?;
         let temporary = path.with_extension(format!("{}.{}.tmp", "json", std::process::id()));
@@ -691,9 +705,10 @@ mod camera_settings_tests {
         assert_eq!(settings.decode_mask().unwrap(), mask);
 
         let value = serde_json::to_value(&settings).unwrap();
-        assert_eq!(value.as_object().unwrap().len(), 1);
+        assert_eq!(value.as_object().unwrap().len(), 2);
         assert!(value.get("index").is_none());
         assert!(value.get("address").is_none());
+        assert_eq!(value["camera_id"], "");
         assert!(value.get("name").is_none());
     }
 
@@ -715,25 +730,27 @@ mod camera_settings_tests {
     }
 
     #[test]
-    fn saving_settings_keeps_nvr_config_and_removes_cached_camera_metadata() {
+    fn saving_settings_persists_camera_id_and_keeps_nvr_config() {
         let path = std::env::temp_dir().join(format!(
             "pager-camera-settings-{}-{}.json",
             std::process::id(),
             std::thread::current().name().unwrap_or("test")
         ));
         let source = format!(
-            r#"{{"schema_version":1,"nvr":{{"base_url":"https://example.invalid","username":"test","password":"secret","auth":"digest","connect_timeout_secs":5,"session_timeout_secs":10,"tls_insecure":true}},"cameras":[{{"area_mask":"{}"}}]}}"#,
+            r#"{{"schema_version":1,"nvr":{{"base_url":"https://example.invalid","username":"test","password":"secret","auth":"digest","connect_timeout_secs":5,"session_timeout_secs":10,"tls_insecure":true}},"cameras":[{{"area_mask":"{}"}}],"demo_mode":true}}"#,
             "0".repeat(160)
         );
         std::fs::write(&path, source).unwrap();
-        let settings = CameraSettings::from_mask(&vec![true; 32 * 20]).unwrap();
+        let settings = CameraSettings::identified("Furtka", &vec![true; 32 * 20]).unwrap();
 
         Config::save_camera_settings(&path, &[settings]).unwrap();
 
         let saved: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         assert_eq!(saved["nvr"]["base_url"], "https://example.invalid");
-        assert_eq!(saved["cameras"][0].as_object().unwrap().len(), 1);
+        assert_eq!(saved["demo_mode"], true);
+        assert_eq!(saved["cameras"][0].as_object().unwrap().len(), 2);
+        assert_eq!(saved["cameras"][0]["camera_id"], "Furtka");
         assert_eq!(
             saved["cameras"][0]["area_mask"].as_str().unwrap().len(),
             160
@@ -742,6 +759,25 @@ mod camera_settings_tests {
         assert!(text.find("schema_version").unwrap() < text.find("\"nvr\"").unwrap());
         assert!(text.find("\"nvr\"").unwrap() < text.find("\"cameras\"").unwrap());
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn demo_mode_defaults_to_off_for_existing_config_files() {
+        let value = serde_json::json!({
+            "schema_version": 1,
+            "nvr": {
+                "base_url": "https://example.invalid",
+                "username": "test",
+                "password": "secret",
+                "auth": "digest",
+                "connect_timeout_secs": 5,
+                "session_timeout_secs": 10,
+                "tls_insecure": true
+            },
+            "cameras": []
+        });
+        let config: Config = serde_json::from_value(value).unwrap();
+        assert!(!config.demo_mode);
     }
 }
 
