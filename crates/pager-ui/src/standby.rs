@@ -9,7 +9,7 @@ use embedded_graphics::{
     text::{Alignment, Text},
 };
 use pager_core::{Alarm, Mode, Pager};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 pub const AREA_COLUMNS: usize = 32;
 pub const AREA_ROWS: usize = 20;
@@ -135,6 +135,7 @@ pub struct Ui {
     history_selected: usize,
     history_image: Option<(u64, Vec<Rgb565>)>,
     history_loading: Option<u64>,
+    history_pending: BTreeSet<u64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -183,6 +184,7 @@ impl Default for Ui {
             history_selected: 0,
             history_image: None,
             history_loading: None,
+            history_pending: BTreeSet::new(),
         }
     }
 }
@@ -330,6 +332,9 @@ impl Ui {
             }
             Action::Wake => {}
         }
+        if self.screen == Screen::History {
+            self.prepare_selected_history_snapshot();
+        }
     }
 
     pub fn cameras(&self) -> &[AreaCamera] {
@@ -341,6 +346,7 @@ impl Ui {
         self.history_selected = self.history.len().saturating_sub(1);
         self.history_image = None;
         self.history_loading = None;
+        self.history_pending.clear();
     }
 
     pub fn history(&self) -> &[HistoryEntry] {
@@ -349,8 +355,12 @@ impl Ui {
 
     pub fn add_history_entry(&mut self, entry: HistoryEntry) {
         self.history.push(entry);
+        if let Some(entry) = self.history.last() {
+            self.history_pending.insert(entry.id);
+        }
         if self.history.len() > HISTORY_LIMIT {
-            self.history.remove(0);
+            let removed = self.history.remove(0);
+            self.history_pending.remove(&removed.id);
         }
         self.history_selected = self.history.len().saturating_sub(1);
         self.history_image = None;
@@ -361,10 +371,15 @@ impl Ui {
         self.history.get(self.history_selected)
     }
 
+    pub fn history_snapshot_pending(&self, id: u64) -> bool {
+        self.history_pending.contains(&id)
+    }
+
     pub fn set_history_snapshot(&mut self, id: u64, file_name: String, image: Vec<Rgb565>) {
         if let Some(entry) = self.history.iter_mut().find(|entry| entry.id == id) {
             entry.snapshot_file = Some(file_name);
         }
+        self.history_pending.remove(&id);
         if self
             .selected_history_entry()
             .is_some_and(|entry| entry.id == id)
@@ -379,9 +394,24 @@ impl Ui {
     }
 
     pub fn set_history_snapshot_failed(&mut self, id: u64) {
+        self.history_pending.remove(&id);
         if self.history_loading == Some(id) {
             self.history_loading = None;
         }
+    }
+
+    fn prepare_selected_history_snapshot(&mut self) {
+        let Some(entry) = self.selected_history_entry() else {
+            self.history_loading = None;
+            return;
+        };
+        let id = entry.id;
+        let has_snapshot = entry.snapshot_file.is_some() || self.history_pending.contains(&id);
+        let already_loaded = self
+            .history_image
+            .as_ref()
+            .is_some_and(|(image_id, _)| *image_id == id);
+        self.history_loading = (has_snapshot && !already_loaded).then_some(id);
     }
 
     pub fn sync_alarms(&mut self, pager: &Pager) {
@@ -675,15 +705,24 @@ impl Ui {
             .draw(display)?;
             render_recent_events(display, self.history.iter().rev().take(4), 48, 52)?;
         } else {
-            Text::with_alignment(
+            let title = if self.screen == Screen::History && !self.history.is_empty() {
+                format!(
+                    "HISTORY ({}/{})",
+                    self.history_selected + 1,
+                    self.history.len()
+                )
+            } else {
                 match self.screen {
-                    Screen::Alarm => "HUMAN DETECTED",
-                    Screen::History => "HISTORY",
-                    Screen::Settings => "SETTINGS",
-                    Screen::AreaCameras => "AREA SETTINGS",
-                    Screen::AreaEditor => self.cameras[self.selected_camera].name.as_str(),
+                    Screen::Alarm => "HUMAN DETECTED".to_owned(),
+                    Screen::History => "HISTORY".to_owned(),
+                    Screen::Settings => "SETTINGS".to_owned(),
+                    Screen::AreaCameras => "AREA SETTINGS".to_owned(),
+                    Screen::AreaEditor => self.cameras[self.selected_camera].name.clone(),
                     Screen::Standby => unreachable!(),
-                },
+                }
+            };
+            Text::with_alignment(
+                &title,
                 Point::new(240, 16),
                 MonoTextStyle::new(&FONT_6X10, Rgb565::WHITE),
                 Alignment::Center,
@@ -728,7 +767,9 @@ impl Ui {
                         .filter(|(id, _)| *id == entry.id)
                     {
                         render_snapshot(display, image)?;
-                    } else if self.history_loading == Some(entry.id) {
+                    } else if self.history_loading == Some(entry.id)
+                        || self.history_pending.contains(&entry.id)
+                    {
                         text(
                             display,
                             "Loading snapshot...",
@@ -739,23 +780,6 @@ impl Ui {
                     } else {
                         render_history_snapshot_unavailable(display)?;
                     }
-                    Rectangle::new(Point::new(16, 267), Size::new(448, 22))
-                        .into_styled(PrimitiveStyle::with_fill(BACKGROUND))
-                        .draw(display)?;
-                    text(
-                        display,
-                        &entry.timestamp,
-                        Point::new(18, 277),
-                        Alignment::Left,
-                        Rgb565::WHITE,
-                    )?;
-                    text(
-                        display,
-                        &entry.camera_name,
-                        Point::new(18, 287),
-                        Alignment::Left,
-                        SECONDARY,
-                    )?;
                 }
             }
         }

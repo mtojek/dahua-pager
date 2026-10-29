@@ -433,6 +433,16 @@ fn record_history_event(
     }
 }
 
+fn fail_history_snapshot(
+    snapshot_history_ids: &mut std::collections::HashMap<u64, u64>,
+    ui: &mut Ui,
+    alarm_sequence: u64,
+) {
+    if let Some(history_id) = snapshot_history_ids.remove(&alarm_sequence) {
+        ui.set_history_snapshot_failed(history_id);
+    }
+}
+
 fn initial_areas(config_path: &str) -> Vec<AreaCamera> {
     Config::load(config_path)
         .map(|config| {
@@ -724,7 +734,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     }
                     if let Some(sender) = &alarm_snapshot_tx {
                         if sender.try_send((sequence, event.channel + 1)).is_err() {
-                            snapshot_history_ids.remove(&sequence);
+                            fail_history_snapshot(&mut snapshot_history_ids, &mut ui, sequence);
                             log(
                                 "SNAPSHOT ERROR",
                                 format!("queue full; snapshot unavailable for alarm={sequence}"),
@@ -737,7 +747,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                             );
                         }
                     } else {
-                        snapshot_history_ids.remove(&sequence);
+                        fail_history_snapshot(&mut snapshot_history_ids, &mut ui, sequence);
                         log(
                             "SNAPSHOT",
                             format!("no NVR client; alarm={sequence} has no snapshot"),
@@ -789,12 +799,12 @@ fn main() -> Result<(), Box<dyn Error>> {
                                 format!("queued demo alarm={sequence} channel={}", camera + 1),
                             );
                         } else {
-                            snapshot_history_ids.remove(&sequence);
+                            fail_history_snapshot(&mut snapshot_history_ids, &mut ui, sequence);
                             log("SNAPSHOT ERROR", "demo snapshot queue is full");
                             ui.set_alarm_snapshot(sequence, None);
                         }
                     } else {
-                        snapshot_history_ids.remove(&sequence);
+                        fail_history_snapshot(&mut snapshot_history_ids, &mut ui, sequence);
                         log("SNAPSHOT ERROR", "demo snapshot unavailable: no NVR client");
                         ui.set_alarm_snapshot(sequence, None);
                     }
@@ -863,16 +873,19 @@ fn main() -> Result<(), Box<dyn Error>> {
                                     log("HISTORY", "snapshot attached to saved event");
                                     ui.set_history_snapshot(history_id, file_name, image.clone());
                                 }
-                                Err(error) => log(
-                                    "HISTORY ERROR",
-                                    format!("snapshot could not be saved: {error}"),
-                                ),
+                                Err(error) => {
+                                    ui.set_history_snapshot_failed(history_id);
+                                    log(
+                                        "HISTORY ERROR",
+                                        format!("snapshot could not be saved: {error}"),
+                                    );
+                                }
                             }
                         }
                         ui.set_alarm_snapshot(sequence, Some(image));
                     }
                     Err(error) => {
-                        snapshot_history_ids.remove(&sequence);
+                        fail_history_snapshot(&mut snapshot_history_ids, &mut ui, sequence);
                         log(
                             "SNAPSHOT ERROR",
                             format!("alarm={sequence} result failed: {error}"),
@@ -932,7 +945,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                         log("HISTORY", format!("saved snapshot unavailable: {error}"));
                     }
                 }
-            } else {
+            } else if !ui.history_snapshot_pending(history_id) {
                 ui.set_history_snapshot_failed(history_id);
             }
         }
