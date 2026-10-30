@@ -35,5 +35,6 @@ Green and yellow buttons below the LCD are Prev/Next where available. Red and
 blue buttons on the right perform the current view's actions, such as Back, ACK
 or Save. Their captions are shown in the desktop case and LCD legend.
 
-The schedule editor and ESP32 port are not implemented yet. See
-[PLAN.md](../../PLAN.md) and [schedule.md](schedule.md).
+The Schedule screen sets daily Auto-arm and Auto-disarm times. See
+[schedule.md](schedule.md) for the controls and transition rules. The ESP32
+port is not implemented yet; see [PLAN.md](../../PLAN.md).

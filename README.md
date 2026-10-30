@@ -30,9 +30,10 @@ Keep `config.local.json` private; it is ignored by Git.
 
 History metadata is stored in `config.local.history.json`; JPEG files are in
 `config.local.history/`. The newest 1,000 records are retained. Both paths are
-ignored by Git. On Mac, the development storage budget defaults to 64 MiB and
-can be changed with `dev_storage_budget_mb` in the local config; history uses
-up to 90% and prunes oldest complete records first.
+ignored by Git. The `dev` section controls Mac development behavior:
+`demo_mode` enables the synthetic alarm, and `storage_limit_mb` sets the
+development history storage limit (default 64 MiB). History uses up to 90% of
+that limit and prunes oldest complete records first.
 
 ## Controls
 
@@ -41,6 +42,7 @@ Enter. **H** opens History, **T** opens Settings, Backspace goes back, and Esc
 closes the app. The red button sleeps the display; an alarm wakes it. The blue
 button cycles ARMED, MUTED and DISARMED.
 
-For the synthetic alarm flow, set `demo_mode` to `true` in the local config. It
-fires once after 15 seconds, uses a selected area mask and fetches its snapshot
-from the configured NVR. Live human events are suppressed while demo mode is on.
+For the synthetic alarm flow, set `dev.demo_mode` to `true` in the local config.
+It fires once after 15 seconds, uses a selected area mask and fetches its
+snapshot from the configured NVR. Live human events are suppressed while demo
+mode is on.

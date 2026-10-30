@@ -21,6 +21,8 @@ const BACKGROUND: Rgb565 = Rgb565::new(1, 3, 2);
 const BORDER: Rgb565 = Rgb565::new(4, 8, 5);
 const SECONDARY: Rgb565 = Rgb565::new(18, 38, 19);
 const PRIMARY: Rgb565 = Rgb565::new(28, 58, 29);
+const SELECTION_FILL: Rgb565 = Rgb565::new(2, 12, 24);
+const SELECTION_BORDER: Rgb565 = Rgb565::new(8, 28, 31);
 const CAMERA_ROW_TOP: i32 = 34;
 const CAMERA_ROW_STEP: i32 = 37;
 const CAMERA_ROW_HEIGHT: u32 = 36;
@@ -38,6 +40,7 @@ pub enum Screen {
     Standby,
     History,
     Settings,
+    Schedule,
     AreaCameras,
     AreaEditor,
     Alarm,
@@ -48,6 +51,7 @@ pub enum Action {
     CycleMode,
     History,
     Settings,
+    OpenSelectedSetting,
     Back,
     Wake,
     OpenAreas,
@@ -57,6 +61,7 @@ pub enum Action {
     PreviousCamera,
     NextCamera,
     SaveAreas,
+    SaveSchedule,
     Acknowledge,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -132,6 +137,7 @@ pub struct Ui {
     save_error: bool,
     area_paint_value: Option<bool>,
     last_painted_cell: Option<(usize, usize)>,
+    area_cursor: (usize, usize),
     return_screen: Screen,
     alarm_presentations: BTreeMap<u64, AlarmPresentation>,
     alarm_acknowledged: bool,
@@ -141,7 +147,14 @@ pub struct Ui {
     history_image: Option<(u64, Vec<Rgb565>)>,
     history_loading: Option<u64>,
     history_pending: BTreeSet<u64>,
+    settings_selected: usize,
+    schedule_values: ScheduleValues,
+    saved_schedule_values: ScheduleValues,
+    schedule_selected_field: usize,
+    schedule_save_error: Option<bool>,
 }
+
+pub type ScheduleValues = (bool, u8, u8, bool, u8, u8);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HistoryEntry {
@@ -181,6 +194,7 @@ impl Default for Ui {
             save_error: false,
             area_paint_value: None,
             last_painted_cell: None,
+            area_cursor: (0, 0),
             return_screen: Screen::Standby,
             alarm_presentations: BTreeMap::new(),
             alarm_acknowledged: false,
@@ -190,6 +204,11 @@ impl Default for Ui {
             history_image: None,
             history_loading: None,
             history_pending: BTreeSet::new(),
+            settings_selected: 0,
+            schedule_values: (false, 22, 0, false, 7, 0),
+            saved_schedule_values: (false, 22, 0, false, 7, 0),
+            schedule_selected_field: 0,
+            schedule_save_error: None,
         }
     }
 }
@@ -223,7 +242,18 @@ impl Ui {
                 Some(Action::Back),
                 None,
             ],
-            Screen::Settings => [None, None, Some(Action::Back), None],
+            Screen::Settings => [
+                Some(Action::Previous),
+                Some(Action::Next),
+                Some(Action::Back),
+                Some(Action::OpenSelectedSetting),
+            ],
+            Screen::Schedule => [
+                Some(Action::Previous),
+                Some(Action::Next),
+                Some(Action::Back),
+                Some(Action::SaveSchedule),
+            ],
             Screen::AreaCameras
                 if !self.camera_loading && !self.camera_load_error && !self.cameras.is_empty() =>
             {
@@ -296,6 +326,17 @@ impl Ui {
                 self.screen = Screen::Settings;
                 self.focus = None;
             }
+            Action::OpenSelectedSetting => {
+                if self.settings_selected == 0 {
+                    self.screen = Screen::AreaCameras;
+                } else {
+                    self.schedule_values = self.saved_schedule_values;
+                    self.schedule_selected_field = 0;
+                    self.schedule_save_error = None;
+                    self.screen = Screen::Schedule;
+                }
+                self.focus = None;
+            }
             Action::OpenAreas => {
                 self.screen = Screen::AreaCameras;
                 self.focus = None;
@@ -316,6 +357,19 @@ impl Ui {
                 self.history_selected =
                     (self.history_selected + 1).min(self.history.len().saturating_sub(1));
             }
+            Action::Previous if self.screen == Screen::Settings => {
+                self.settings_selected = self.settings_selected.saturating_sub(1);
+            }
+            Action::Next if self.screen == Screen::Settings => {
+                self.settings_selected = (self.settings_selected + 1).min(1);
+            }
+            Action::Previous if self.screen == Screen::Schedule => {
+                self.move_schedule_field(false);
+            }
+            Action::Next if self.screen == Screen::Schedule => {
+                self.move_schedule_field(true);
+            }
+            Action::SaveSchedule => {}
             Action::Previous => pager.navigate(false),
             Action::Next => pager.navigate(true),
             Action::PreviousCamera if !self.cameras.is_empty() => {
@@ -332,10 +386,15 @@ impl Ui {
                     self.history_image = None;
                     self.history_loading = None;
                 }
+                if self.screen == Screen::Schedule {
+                    self.schedule_values = self.saved_schedule_values;
+                    self.schedule_save_error = None;
+                }
                 self.screen = match self.screen {
                     Screen::Alarm => self.return_screen,
                     Screen::AreaEditor => Screen::AreaCameras,
                     Screen::AreaCameras => Screen::Settings,
+                    Screen::Schedule => Screen::Settings,
                     _ => Screen::Standby,
                 };
                 self.focus = None;
@@ -357,6 +416,71 @@ impl Ui {
         self.history_image = None;
         self.history_loading = None;
         self.history_pending.clear();
+    }
+
+    pub fn set_schedule_values(&mut self, values: ScheduleValues) {
+        self.schedule_values = values;
+        self.saved_schedule_values = values;
+    }
+
+    pub fn schedule_values(&self) -> ScheduleValues {
+        self.schedule_values
+    }
+
+    pub fn schedule_values_valid(&self) -> bool {
+        let (arm_enabled, arm_hour, arm_minute, disarm_enabled, disarm_hour, disarm_minute) =
+            self.schedule_values;
+        !(arm_enabled && disarm_enabled && arm_hour == disarm_hour && arm_minute == disarm_minute)
+    }
+
+    pub fn schedule_save_completed(&mut self) {
+        self.saved_schedule_values = self.schedule_values;
+        self.schedule_save_error = None;
+        self.screen = Screen::Settings;
+        self.focus = None;
+    }
+
+    pub fn schedule_save_failed(&mut self, invalid_times: bool) {
+        self.schedule_save_error = Some(invalid_times);
+    }
+
+    pub fn navigate_settings(&mut self, forward: bool) {
+        if self.screen == Screen::Settings {
+            self.settings_selected = if forward {
+                (self.settings_selected + 1).min(1)
+            } else {
+                self.settings_selected.saturating_sub(1)
+            };
+        }
+    }
+
+    pub fn move_schedule_field(&mut self, forward: bool) {
+        if self.screen == Screen::Schedule {
+            self.schedule_selected_field = if forward {
+                (self.schedule_selected_field + 1) % 6
+            } else {
+                (self.schedule_selected_field + 5) % 6
+            };
+        }
+    }
+
+    pub fn change_schedule_value(&mut self, increase: bool) {
+        if self.screen != Screen::Schedule {
+            return;
+        }
+        let delta = if increase { 1_i16 } else { -1_i16 };
+        let (arm_enabled, arm_hour, arm_minute, disarm_enabled, disarm_hour, disarm_minute) =
+            &mut self.schedule_values;
+        let wrap = |value: u8, max: i16| (i16::from(value) + delta).rem_euclid(max) as u8;
+        match self.schedule_selected_field {
+            0 => *arm_enabled = !*arm_enabled,
+            1 => *arm_hour = wrap(*arm_hour, 24),
+            2 => *arm_minute = wrap(*arm_minute, 60),
+            3 => *disarm_enabled = !*disarm_enabled,
+            4 => *disarm_hour = wrap(*disarm_hour, 24),
+            _ => *disarm_minute = wrap(*disarm_minute, 60),
+        }
+        self.schedule_save_error = None;
     }
 
     pub fn retain_history_ids(&mut self, ids: &[u64]) {
@@ -596,6 +720,7 @@ impl Ui {
             return;
         };
         self.area_paint_value = Some(!self.cameras[self.selected_camera].mask[row][col]);
+        self.area_cursor = (row, col);
         self.paint_area_cell(row, col);
     }
 
@@ -603,7 +728,27 @@ impl Ui {
         let Some((row, col)) = self.area_cell_at(point) else {
             return;
         };
+        self.area_cursor = (row, col);
         self.paint_area_cell(row, col);
+    }
+
+    pub fn move_area_cursor(&mut self, dx: i8, dy: i8) {
+        if self.screen != Screen::AreaEditor {
+            return;
+        }
+        let (row, col) = self.area_cursor;
+        self.area_cursor = (
+            (row as i32 + i32::from(dy)).clamp(0, AREA_ROWS as i32 - 1) as usize,
+            (col as i32 + i32::from(dx)).clamp(0, AREA_COLUMNS as i32 - 1) as usize,
+        );
+    }
+
+    pub fn toggle_area_cursor(&mut self) {
+        if self.screen == Screen::AreaEditor {
+            let (row, col) = self.area_cursor;
+            self.cameras[self.selected_camera].mask[row][col] =
+                !self.cameras[self.selected_camera].mask[row][col];
+        }
     }
 
     pub fn end_area_paint(&mut self) {
@@ -648,8 +793,17 @@ impl Ui {
         }
         match self.screen {
             Screen::Settings if (44..=93).contains(&point.y) => {
-                let _ = pager;
+                self.settings_selected = 0;
                 self.screen = Screen::AreaCameras;
+                self.focus = None;
+                true
+            }
+            Screen::Settings if (102..=151).contains(&point.y) => {
+                self.settings_selected = 1;
+                self.schedule_values = self.saved_schedule_values;
+                self.schedule_selected_field = 0;
+                self.schedule_save_error = None;
+                self.screen = Screen::Schedule;
                 self.focus = None;
                 true
             }
@@ -669,6 +823,7 @@ impl Ui {
                 false
             }
             Screen::AreaEditor => self.area_cell_at(point).is_some_and(|(row, col)| {
+                self.area_cursor = (row, col);
                 self.cameras[self.selected_camera].mask[row][col] =
                     !self.cameras[self.selected_camera].mask[row][col];
                 true
@@ -752,6 +907,7 @@ impl Ui {
                     Screen::Alarm => "HUMAN DETECTED".to_owned(),
                     Screen::History => "HISTORY".to_owned(),
                     Screen::Settings => "SETTINGS".to_owned(),
+                    Screen::Schedule => "SCHEDULE".to_owned(),
                     Screen::AreaCameras => "AREA SETTINGS".to_owned(),
                     Screen::AreaEditor => self.cameras[self.selected_camera].name.clone(),
                     Screen::Standby => unreachable!(),
@@ -777,13 +933,16 @@ impl Ui {
                     )?;
                 }
             } else if self.screen == Screen::Settings {
-                render_settings(display)?;
+                render_settings(display, self)?;
+            } else if self.screen == Screen::Schedule {
+                render_schedule(display, self)?;
             } else if self.screen == Screen::AreaCameras {
                 render_area_cameras(display, self)?;
             } else if self.screen == Screen::AreaEditor {
                 render_area_editor(
                     display,
                     &self.cameras[self.selected_camera],
+                    self.area_cursor,
                     self.save_error,
                 )?;
             } else if self.screen == Screen::History {
@@ -832,9 +991,11 @@ impl Ui {
             Action::Back => "Back",
             Action::Wake => "Wake",
             Action::OpenAreas | Action::SelectAreaCamera => "Select",
+            Action::OpenSelectedSetting => "Select",
             Action::Previous | Action::PreviousCamera => "Prev",
             Action::Next | Action::NextCamera => "Next",
             Action::SaveAreas => "Save",
+            Action::SaveSchedule => "Save",
             Action::Acknowledge => "ACK",
         }
     }
@@ -1061,10 +1222,10 @@ fn render_area_cameras<D: DrawTarget<Color = Rgb565>>(
         let top = CAMERA_ROW_TOP + row as i32 * CAMERA_ROW_STEP;
         if i == ui.selected_camera {
             Rectangle::new(Point::new(12, top), Size::new(456, CAMERA_ROW_HEIGHT))
-                .into_styled(PrimitiveStyle::with_fill(Rgb565::new(2, 12, 24)))
+                .into_styled(PrimitiveStyle::with_fill(SELECTION_FILL))
                 .draw(display)?;
             Rectangle::new(Point::new(12, top), Size::new(456, CAMERA_ROW_HEIGHT))
-                .into_styled(PrimitiveStyle::with_stroke(Rgb565::new(8, 28, 31), 1))
+                .into_styled(PrimitiveStyle::with_stroke(SELECTION_BORDER, 1))
                 .draw(display)?;
         }
         text(
@@ -1097,6 +1258,7 @@ fn render_area_cameras<D: DrawTarget<Color = Rgb565>>(
 fn render_area_editor<D: DrawTarget<Color = Rgb565>>(
     display: &mut D,
     camera: &AreaCamera,
+    area_cursor: (usize, usize),
     save_error: bool,
 ) -> Result<(), D::Error> {
     const LEFT: i32 = 16;
@@ -1131,6 +1293,17 @@ fn render_area_editor<D: DrawTarget<Color = Rgb565>>(
                 .into_styled(PrimitiveStyle::with_fill(Rgb565::new(16, 32, 16)))
                 .draw(display)?;
         }
+        let (cursor_row, cursor_col) = area_cursor;
+        let cursor_left = LEFT + cursor_col as i32 * AREA_IMAGE_WIDTH as i32 / AREA_COLUMNS as i32;
+        let cursor_top = TOP + cursor_row as i32 * AREA_IMAGE_HEIGHT as i32 / AREA_ROWS as i32;
+        let cursor_width = AREA_IMAGE_WIDTH / AREA_COLUMNS as u32;
+        let cursor_height = AREA_IMAGE_HEIGHT / AREA_ROWS as u32;
+        Rectangle::new(
+            Point::new(cursor_left, cursor_top),
+            Size::new(cursor_width, cursor_height),
+        )
+        .into_styled(PrimitiveStyle::with_stroke(SELECTION_BORDER, 2))
+        .draw(display)?;
     } else {
         let message = if camera.snapshot_loading {
             "Loading snapshot..."
@@ -1152,7 +1325,7 @@ fn render_area_editor<D: DrawTarget<Color = Rgb565>>(
         if save_error {
             "Save failed"
         } else {
-            "Click cells to mark area"
+            "Arrows move; Enter toggles cell"
         },
         Point::new(16, 300),
         Alignment::Left,
@@ -1165,42 +1338,155 @@ fn render_area_editor<D: DrawTarget<Color = Rgb565>>(
     Ok(())
 }
 
-fn render_settings<D: DrawTarget<Color = Rgb565>>(display: &mut D) -> Result<(), D::Error> {
+fn render_settings<D: DrawTarget<Color = Rgb565>>(
+    display: &mut D,
+    ui: &Ui,
+) -> Result<(), D::Error> {
     let rows = [
-        ("Area Settings", "Detection areas for each camera", true),
-        ("Schedule", "Operating modes by day and time", false),
+        ("Area Settings", "Detection areas for each camera"),
+        ("Schedule", "Daily auto-arm and auto-disarm"),
     ];
-    for (i, (title, description, available)) in rows.iter().enumerate() {
+    for (i, (title, description)) in rows.iter().enumerate() {
         let top = 44 + i as i32 * 58;
+        if i == ui.settings_selected {
+            Rectangle::new(Point::new(12, top - 8), Size::new(456, 49))
+                .into_styled(PrimitiveStyle::with_fill(SELECTION_FILL))
+                .draw(display)?;
+            Rectangle::new(Point::new(12, top - 8), Size::new(456, 49))
+                .into_styled(PrimitiveStyle::with_stroke(SELECTION_BORDER, 1))
+                .draw(display)?;
+        }
         text(
             display,
             title,
             Point::new(16, top + 12),
             Alignment::Left,
-            PRIMARY,
+            if i == ui.settings_selected {
+                Rgb565::WHITE
+            } else {
+                PRIMARY
+            },
         )?;
         Text::new(
             description,
             Point::new(16, top + 31),
-            MonoTextStyle::new(&FONT_6X10, SECONDARY),
+            MonoTextStyle::new(
+                &FONT_6X10,
+                if i == ui.settings_selected {
+                    Rgb565::WHITE
+                } else {
+                    SECONDARY
+                },
+            ),
         )
         .draw(display)?;
-        // These sections are not implemented; do not draw active chevrons or
-        // a selected row that would imply they can already be opened.
-        if !available {
-            Text::with_alignment(
-                "COMING SOON",
-                Point::new(464, top + 12),
-                MonoTextStyle::new(&FONT_6X10, SECONDARY),
-                Alignment::Right,
-            )
-            .draw(display)?;
-        }
         if i < rows.len() - 1 {
             Rectangle::new(Point::new(16, top + 49), Size::new(448, 1))
                 .into_styled(PrimitiveStyle::with_fill(BORDER))
                 .draw(display)?;
         }
+    }
+    Ok(())
+}
+
+fn render_schedule<D: DrawTarget<Color = Rgb565>>(
+    display: &mut D,
+    ui: &Ui,
+) -> Result<(), D::Error> {
+    let (arm_enabled, arm_hour, arm_minute, disarm_enabled, disarm_hour, disarm_minute) =
+        ui.schedule_values;
+    let rows = [
+        ("Auto-arm", arm_enabled, arm_hour, arm_minute, 92),
+        (
+            "Auto-disarm",
+            disarm_enabled,
+            disarm_hour,
+            disarm_minute,
+            166,
+        ),
+    ];
+    for (row_index, (label, enabled, hour, minute, baseline)) in rows.into_iter().enumerate() {
+        let selected = ui.schedule_selected_field;
+        let selected_field = if row_index == 0 {
+            selected
+        } else {
+            selected.saturating_sub(3)
+        };
+        if selected / 3 == row_index {
+            let (left, width) = match selected_field {
+                0 => (216, 35),
+                1 => (332, 24),
+                _ => (368, 24),
+            };
+            let selection = Rectangle::new(Point::new(left, baseline - 19), Size::new(width, 23));
+            selection
+                .into_styled(PrimitiveStyle::with_fill(SELECTION_FILL))
+                .draw(display)?;
+            selection
+                .into_styled(PrimitiveStyle::with_stroke(SELECTION_BORDER, 1))
+                .draw(display)?;
+        }
+        Text::new(
+            label,
+            Point::new(24, baseline),
+            MonoTextStyle::new(&FONT_9X18_BOLD, Rgb565::WHITE),
+        )
+        .draw(display)?;
+        let toggle = if enabled { "ON" } else { "OFF" };
+        Text::new(
+            toggle,
+            Point::new(220, baseline),
+            MonoTextStyle::new(
+                &FONT_9X18,
+                if selected_field == 0 && selected / 3 == row_index {
+                    Rgb565::WHITE
+                } else {
+                    PRIMARY
+                },
+            ),
+        )
+        .draw(display)?;
+        Text::new(
+            &format!("{hour:02}"),
+            Point::new(336, baseline),
+            MonoTextStyle::new(&FONT_9X18, Rgb565::WHITE),
+        )
+        .draw(display)?;
+        Text::new(
+            ":",
+            Point::new(359, baseline),
+            MonoTextStyle::new(&FONT_9X18, Rgb565::WHITE),
+        )
+        .draw(display)?;
+        Text::new(
+            &format!("{minute:02}"),
+            Point::new(372, baseline),
+            MonoTextStyle::new(&FONT_9X18, Rgb565::WHITE),
+        )
+        .draw(display)?;
+        if row_index == 0 {
+            Rectangle::new(Point::new(16, baseline + 25), Size::new(448, 1))
+                .into_styled(PrimitiveStyle::with_fill(BORDER))
+                .draw(display)?;
+        }
+    }
+    Text::new(
+        "LEFT/RIGHT: FIELD     UP/DOWN: CHANGE",
+        Point::new(16, 244),
+        MonoTextStyle::new(&FONT_6X10, SECONDARY),
+    )
+    .draw(display)?;
+    if let Some(invalid_times) = ui.schedule_save_error {
+        Text::new(
+            if invalid_times {
+                "Times must differ when both are enabled"
+            } else {
+                "Save failed"
+            },
+            Point::new(16, 270),
+            MonoTextStyle::new(&FONT_6X10, Rgb565::new(31, 8, 5)),
+        )
+        .draw(display)?;
     }
     Ok(())
 }

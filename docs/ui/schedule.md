@@ -1,16 +1,19 @@
 # Schedule
 
-The schedule editor is planned under Settings. One weekly schedule will select
-ARMED, MUTED or DISARMED for all cameras.
+The Schedule screen has two daily transitions: **Auto-arm** and
+**Auto-disarm**. Each can be turned on or off and has a 24-hour local time.
+Both are off by default.
 
-- Each period has days, a start/end time and a mode.
-- ARMED records and sounds new alarms; MUTED records without sound; DISARMED
-  ignores new detections.
-- Display local time using Europe/Warsaw by default and handle daylight-saving
-  changes. Store event timestamps in UTC.
-- Save validates periods and writes the config. Proposed rule: a manual mode
-  change lasts until the next scheduled transition. Define gaps and overlaps
-  before implementation.
-- Show whether the current mode is manual or scheduled and the next transition.
+- Left/Right selects ON/OFF, hour or minute. Up/Down changes the selected
+  value; hour and minute wrap around.
+- Blue **Save** writes the schedule to `config.local.json`. Red **Back**
+  discards edits.
+- When both transitions are on, Auto-arm sets ARMED and Auto-disarm sets
+  DISARMED. The armed interval can cross midnight. Their times must differ.
+- A single enabled transition applies its mode at that time. A manual mode
+  change lasts until the next enabled transition.
+- On startup, when both transitions are enabled, the current mode is inferred
+  from the time interval. The schedule uses the Mac's local timezone.
 
-The editor and schedule evaluator are not implemented yet.
+The schedule is evaluated by the Mac app. The ESP32 port will reuse these
+settings and apply them using its local clock.

@@ -9,6 +9,17 @@
     "session_timeout_secs": 60,
     "tls_insecure": false
   },
+  "schedule": {
+    "auto_arm_enabled": false,
+    "auto_arm_hour": 22,
+    "auto_arm_minute": 0,
+    "auto_disarm_enabled": false,
+    "auto_disarm_hour": 7,
+    "auto_disarm_minute": 0
+  },
   "cameras": [],
-  "demo_mode": false
+  "dev": {
+    "demo_mode": false,
+    "storage_limit_mb": 64
+  }
 }

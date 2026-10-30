@@ -1,10 +1,11 @@
+use chrono::{Datelike, Timelike};
 use embedded_graphics::pixelcolor::Rgb565;
 use embedded_graphics::prelude::*;
 use minifb::{CursorStyle, Key, KeyRepeat, MouseButton, MouseMode, Scale, Window, WindowOptions};
 use pager_core::{Mode, Pager, Rectangle as AlarmRectangle};
 use pager_dahua::{
     Camera, CameraSettings, Config, ConnectionState, DEFAULT_DEV_STORAGE_BUDGET_MB, DahuaClient,
-    Error as DahuaError, Event, Message, Subscription,
+    Error as DahuaError, Event, Message, ScheduleSettings, Subscription,
 };
 use pager_ui::{
     AREA_COLUMNS, AREA_IMAGE_HEIGHT, AREA_IMAGE_WIDTH, AREA_ROWS, Action, AreaCamera,
@@ -81,6 +82,123 @@ fn log_storage_transition(
             "STORAGE ERROR",
             format!("{operation}: could not read usage: {error}"),
         ),
+    }
+}
+
+fn local_minute_of_day() -> u16 {
+    let now = chrono::Local::now();
+    (now.hour() * 60 + now.minute()) as u16
+}
+
+fn local_minute_key() -> i64 {
+    let now = chrono::Local::now();
+    i64::from(now.date_naive().num_days_from_ce()) * 1440
+        + i64::from(now.hour() * 60 + now.minute())
+}
+
+fn scheduled_mode_at(schedule: &ScheduleSettings, minute: u16) -> Option<Mode> {
+    let arm = schedule
+        .auto_arm_enabled
+        .then_some(u16::from(schedule.auto_arm_hour) * 60 + u16::from(schedule.auto_arm_minute));
+    let disarm = schedule.auto_disarm_enabled.then_some(
+        u16::from(schedule.auto_disarm_hour) * 60 + u16::from(schedule.auto_disarm_minute),
+    );
+    match (arm, disarm) {
+        (Some(arm), Some(disarm)) if arm < disarm => Some(if (arm..disarm).contains(&minute) {
+            Mode::Armed
+        } else {
+            Mode::Disarmed
+        }),
+        (Some(arm), Some(disarm)) if arm > disarm => Some(if minute >= arm || minute < disarm {
+            Mode::Armed
+        } else {
+            Mode::Disarmed
+        }),
+        (Some(_), Some(_)) => None,
+        (Some(arm), None) => (minute >= arm).then_some(Mode::Armed),
+        (None, Some(disarm)) => (minute >= disarm).then_some(Mode::Disarmed),
+        (None, None) => None,
+    }
+}
+
+fn scheduled_transition_at(schedule: &ScheduleSettings, minute: u16) -> Option<Mode> {
+    if schedule.auto_arm_enabled
+        && minute == u16::from(schedule.auto_arm_hour) * 60 + u16::from(schedule.auto_arm_minute)
+    {
+        Some(Mode::Armed)
+    } else if schedule.auto_disarm_enabled
+        && minute
+            == u16::from(schedule.auto_disarm_hour) * 60 + u16::from(schedule.auto_disarm_minute)
+    {
+        Some(Mode::Disarmed)
+    } else {
+        None
+    }
+}
+
+fn save_schedule(
+    config_path: &str,
+    ui: &mut Ui,
+    schedule: &mut ScheduleSettings,
+    pager: &mut Pager,
+    last_schedule_minute: &mut i64,
+    file_io_active: Arc<AtomicUsize>,
+) {
+    if !ui.schedule_values_valid() {
+        ui.schedule_save_failed(true);
+        return;
+    }
+    let (
+        auto_arm_enabled,
+        auto_arm_hour,
+        auto_arm_minute,
+        auto_disarm_enabled,
+        auto_disarm_hour,
+        auto_disarm_minute,
+    ) = ui.schedule_values();
+    let next = ScheduleSettings {
+        auto_arm_enabled,
+        auto_arm_hour,
+        auto_arm_minute,
+        auto_disarm_enabled,
+        auto_disarm_hour,
+        auto_disarm_minute,
+    };
+    let _activity = FileIoActivity::begin(file_io_active);
+    match Config::save_schedule(config_path, &next) {
+        Ok(()) => {
+            *schedule = next;
+            ui.schedule_save_completed();
+            log(
+                "SCHEDULE",
+                format!(
+                    "saved auto-arm={} {:02}:{:02}, auto-disarm={} {:02}:{:02}",
+                    schedule.auto_arm_enabled,
+                    schedule.auto_arm_hour,
+                    schedule.auto_arm_minute,
+                    schedule.auto_disarm_enabled,
+                    schedule.auto_disarm_hour,
+                    schedule.auto_disarm_minute,
+                ),
+            );
+            if let Some(mode) = scheduled_mode_at(schedule, local_minute_of_day())
+                && pager.mode != mode
+            {
+                log(
+                    "MODE",
+                    format!("{:?} -> {:?} (schedule saved)", pager.mode, mode),
+                );
+                pager.set_mode(mode);
+            }
+            *last_schedule_minute = local_minute_key();
+        }
+        Err(error) => {
+            ui.schedule_save_failed(false);
+            log(
+                "SCHEDULE ERROR",
+                format!("could not save schedule: {error}"),
+            );
+        }
     }
 }
 
@@ -186,7 +304,7 @@ fn connect(
             return (None, ConnectionStatus::ConfigError, None, None, false);
         }
     };
-    let demo_mode = config.demo_mode;
+    let demo_mode = config.dev.demo_mode;
     if demo_mode {
         log(
             "DEMO",
@@ -624,9 +742,32 @@ fn main() -> Result<(), Box<dyn Error>> {
         "UI",
         "initial LCD frame presented before NVR initialization",
     );
-    let storage_budget_mb = Config::load(config_path)
-        .map(|config| config.dev_storage_budget_mb)
+    let loaded_config = Config::load(config_path).ok();
+    let storage_budget_mb = loaded_config
+        .as_ref()
+        .map(|config| config.dev.storage_limit_mb)
         .unwrap_or(DEFAULT_DEV_STORAGE_BUDGET_MB);
+    let mut schedule = loaded_config
+        .map(|config| config.schedule)
+        .unwrap_or_default();
+    ui.set_schedule_values((
+        schedule.auto_arm_enabled,
+        schedule.auto_arm_hour,
+        schedule.auto_arm_minute,
+        schedule.auto_disarm_enabled,
+        schedule.auto_disarm_hour,
+        schedule.auto_disarm_minute,
+    ));
+    let mut last_schedule_minute = local_minute_key();
+    if let Some(mode) = scheduled_mode_at(&schedule, local_minute_of_day())
+        && pager.mode != mode
+    {
+        log(
+            "MODE",
+            format!("{:?} -> {:?} (schedule startup)", pager.mode, mode),
+        );
+        pager.set_mode(mode);
+    }
     let storage_limit_bytes = storage_budget_mb
         .saturating_mul(1024 * 1024)
         .saturating_mul(90)
@@ -695,6 +836,19 @@ fn main() -> Result<(), Box<dyn Error>> {
     'app: while window.is_open() {
         let now = clock.elapsed().as_millis() as u64;
         pager.tick(now);
+        let schedule_minute = local_minute_key();
+        if schedule_minute != last_schedule_minute {
+            if let Some(mode) = scheduled_transition_at(&schedule, local_minute_of_day())
+                && pager.mode != mode
+            {
+                log(
+                    "MODE",
+                    format!("{:?} -> {:?} (scheduled transition)", pager.mode, mode),
+                );
+                pager.set_mode(mode);
+            }
+            last_schedule_minute = schedule_minute;
+        }
         if let (Some(subscription), Some(monitor)) = (&subscription, &mut network_path) {
             monitor.poll(subscription);
         }
@@ -1104,16 +1258,70 @@ fn main() -> Result<(), Box<dyn Error>> {
                     );
                     log("INPUT", format!("focus -> {:?}", ui.focused_action()));
                 }
-                Key::Down | Key::Right => {
-                    ui.move_focus(true);
-                    log("INPUT", format!("focus -> {:?}", ui.focused_action()));
+                Key::Down if ui.screen == pager_ui::Screen::Schedule => {
+                    ui.change_schedule_value(true);
                 }
-                Key::Up | Key::Left => {
-                    ui.move_focus(false);
-                    log("INPUT", format!("focus -> {:?}", ui.focused_action()));
+                Key::Up if ui.screen == pager_ui::Screen::Schedule => {
+                    ui.change_schedule_value(false);
+                }
+                Key::Right if ui.screen == pager_ui::Screen::Schedule => {
+                    ui.move_schedule_field(true);
+                }
+                Key::Left if ui.screen == pager_ui::Screen::Schedule => {
+                    ui.move_schedule_field(false);
+                }
+                Key::Down if ui.screen == pager_ui::Screen::Settings => {
+                    ui.navigate_settings(true);
+                }
+                Key::Up if ui.screen == pager_ui::Screen::Settings => {
+                    ui.navigate_settings(false);
+                }
+                Key::Up if ui.screen == pager_ui::Screen::AreaCameras => {
+                    apply_ui_action(&mut ui, &mut pager, Action::PreviousCamera);
+                }
+                Key::Down if ui.screen == pager_ui::Screen::AreaCameras => {
+                    apply_ui_action(&mut ui, &mut pager, Action::NextCamera);
+                }
+                Key::Left
+                    if matches!(
+                        ui.screen,
+                        pager_ui::Screen::History | pager_ui::Screen::Alarm
+                    ) =>
+                {
+                    apply_ui_action(&mut ui, &mut pager, Action::Previous);
+                }
+                Key::Right
+                    if matches!(
+                        ui.screen,
+                        pager_ui::Screen::History | pager_ui::Screen::Alarm
+                    ) =>
+                {
+                    apply_ui_action(&mut ui, &mut pager, Action::Next);
+                }
+                Key::Up if ui.screen == pager_ui::Screen::AreaEditor => {
+                    ui.move_area_cursor(0, -1);
+                }
+                Key::Down if ui.screen == pager_ui::Screen::AreaEditor => {
+                    ui.move_area_cursor(0, 1);
+                }
+                Key::Left if ui.screen == pager_ui::Screen::AreaEditor => {
+                    ui.move_area_cursor(-1, 0);
+                }
+                Key::Right if ui.screen == pager_ui::Screen::AreaEditor => {
+                    ui.move_area_cursor(1, 0);
                 }
                 Key::Enter | Key::Space => {
-                    if let Some(action) = ui.focused_action() {
+                    if ui.screen == pager_ui::Screen::AreaEditor {
+                        ui.toggle_area_cursor();
+                    }
+                    let action = match ui.screen {
+                        pager_ui::Screen::Settings => Some(Action::OpenSelectedSetting),
+                        pager_ui::Screen::Schedule => Some(Action::SaveSchedule),
+                        pager_ui::Screen::AreaCameras => Some(Action::SelectAreaCamera),
+                        pager_ui::Screen::AreaEditor => None,
+                        _ => ui.focused_action(),
+                    };
+                    if let Some(action) = action {
                         let previous_screen = ui.screen;
                         apply_ui_action(&mut ui, &mut pager, action);
                         if previous_screen == pager_ui::Screen::AreaCameras
@@ -1131,6 +1339,16 @@ fn main() -> Result<(), Box<dyn Error>> {
                                 log("AREAS ERROR", "failed to save camera masks");
                                 ui.save_failed();
                             }
+                        }
+                        if action == Action::SaveSchedule {
+                            save_schedule(
+                                config_path,
+                                &mut ui,
+                                &mut schedule,
+                                &mut pager,
+                                &mut last_schedule_minute,
+                                file_io_active.clone(),
+                            );
                         }
                     }
                 }
@@ -1168,6 +1386,16 @@ fn main() -> Result<(), Box<dyn Error>> {
                     log("AREAS ERROR", "failed to save camera masks");
                     ui.save_failed();
                 }
+            }
+            if action == Action::SaveSchedule {
+                save_schedule(
+                    config_path,
+                    &mut ui,
+                    &mut schedule,
+                    &mut pager,
+                    &mut last_schedule_minute,
+                    file_io_active.clone(),
+                );
             }
         }
         let mouse_down = window.get_mouse_down(MouseButton::Left);

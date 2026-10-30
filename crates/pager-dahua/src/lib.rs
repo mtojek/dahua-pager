@@ -54,15 +54,84 @@ type Result<T> = std::result::Result<T, Error>;
 pub struct Config {
     pub schema_version: u32,
     pub nvr: NvrConfig,
+    #[serde(default)]
+    pub schedule: ScheduleSettings,
     pub cameras: Vec<CameraSettings>,
     #[serde(default)]
-    pub demo_mode: bool,
-    #[serde(default = "default_dev_storage_budget_mb")]
-    pub dev_storage_budget_mb: u64,
+    pub dev: DevSettings,
 }
 
-fn default_dev_storage_budget_mb() -> u64 {
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct DevSettings {
+    #[serde(default)]
+    pub demo_mode: bool,
+    #[serde(default = "default_storage_limit_mb")]
+    pub storage_limit_mb: u64,
+}
+
+impl Default for DevSettings {
+    fn default() -> Self {
+        Self {
+            demo_mode: false,
+            storage_limit_mb: default_storage_limit_mb(),
+        }
+    }
+}
+
+fn default_storage_limit_mb() -> u64 {
     DEFAULT_DEV_STORAGE_BUDGET_MB
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ScheduleSettings {
+    #[serde(default)]
+    pub auto_arm_enabled: bool,
+    #[serde(default = "default_arm_hour")]
+    pub auto_arm_hour: u8,
+    #[serde(default)]
+    pub auto_arm_minute: u8,
+    #[serde(default)]
+    pub auto_disarm_enabled: bool,
+    #[serde(default = "default_disarm_hour")]
+    pub auto_disarm_hour: u8,
+    #[serde(default)]
+    pub auto_disarm_minute: u8,
+}
+
+impl Default for ScheduleSettings {
+    fn default() -> Self {
+        Self {
+            auto_arm_enabled: false,
+            auto_arm_hour: default_arm_hour(),
+            auto_arm_minute: 0,
+            auto_disarm_enabled: false,
+            auto_disarm_hour: default_disarm_hour(),
+            auto_disarm_minute: 0,
+        }
+    }
+}
+
+impl ScheduleSettings {
+    pub fn is_valid(&self) -> bool {
+        self.auto_arm_hour < 24
+            && self.auto_arm_minute < 60
+            && self.auto_disarm_hour < 24
+            && self.auto_disarm_minute < 60
+            && !(self.auto_arm_enabled
+                && self.auto_disarm_enabled
+                && self.auto_arm_hour == self.auto_disarm_hour
+                && self.auto_arm_minute == self.auto_disarm_minute)
+    }
+}
+
+fn default_arm_hour() -> u8 {
+    22
+}
+
+fn default_disarm_hour() -> u8 {
+    7
 }
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -183,7 +252,8 @@ impl Config {
             || self.nvr.password.is_empty()
             || self.nvr.connect_timeout_secs == 0
             || self.nvr.session_timeout_secs == 0
-            || self.dev_storage_budget_mb == 0
+            || self.dev.storage_limit_mb == 0
+            || !self.schedule.is_valid()
         {
             return Err(Error::Config);
         }
@@ -197,16 +267,36 @@ impl Config {
     /// Replaces positional area settings atomically while preserving local config permissions.
     pub fn save_camera_settings(path: impl AsRef<Path>, cameras: &[CameraSettings]) -> Result<()> {
         let path = path.as_ref();
-        let metadata = std::fs::metadata(path).map_err(|_| Error::Config)?;
         let current = Self::load(path)?;
         let updated = Self {
             schema_version: current.schema_version,
             nvr: current.nvr,
             cameras: cameras.to_vec(),
-            demo_mode: current.demo_mode,
-            dev_storage_budget_mb: current.dev_storage_budget_mb,
+            dev: current.dev,
+            schedule: current.schedule,
         };
-        let encoded = serde_json::to_vec_pretty(&updated).map_err(|_| Error::Config)?;
+        Self::save_updated(path, &updated)
+    }
+
+    pub fn save_schedule(path: impl AsRef<Path>, schedule: &ScheduleSettings) -> Result<()> {
+        if !schedule.is_valid() {
+            return Err(Error::Config);
+        }
+        let path = path.as_ref();
+        let current = Self::load(path)?;
+        let updated = Self {
+            schema_version: current.schema_version,
+            nvr: current.nvr,
+            cameras: current.cameras,
+            dev: current.dev,
+            schedule: schedule.clone(),
+        };
+        Self::save_updated(path, &updated)
+    }
+
+    fn save_updated(path: &Path, updated: &Self) -> Result<()> {
+        let metadata = std::fs::metadata(path).map_err(|_| Error::Config)?;
+        let encoded = serde_json::to_vec_pretty(updated).map_err(|_| Error::Config)?;
         let temporary = path.with_extension(format!("{}.{}.tmp", "json", std::process::id()));
         let result = (|| {
             let mut file = std::fs::OpenOptions::new()
@@ -777,7 +867,7 @@ mod camera_settings_tests {
             std::thread::current().name().unwrap_or("test")
         ));
         let source = format!(
-            r#"{{"schema_version":1,"nvr":{{"base_url":"https://example.invalid","username":"test","password":"secret","auth":"digest","connect_timeout_secs":5,"session_timeout_secs":10,"tls_insecure":true}},"cameras":[{{"area_mask":"{}"}}],"demo_mode":true}}"#,
+            r#"{{"schema_version":1,"nvr":{{"base_url":"https://example.invalid","username":"test","password":"secret","auth":"digest","connect_timeout_secs":5,"session_timeout_secs":10,"tls_insecure":true}},"cameras":[{{"area_mask":"{}"}}],"dev":{{"demo_mode":true,"storage_limit_mb":64}}}}"#,
             "0".repeat(160)
         );
         std::fs::write(&path, source).unwrap();
@@ -788,7 +878,8 @@ mod camera_settings_tests {
         let saved: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         assert_eq!(saved["nvr"]["base_url"], "https://example.invalid");
-        assert_eq!(saved["demo_mode"], true);
+        assert_eq!(saved["dev"]["demo_mode"], true);
+        assert_eq!(saved["dev"]["storage_limit_mb"], 64);
         assert_eq!(saved["cameras"][0].as_object().unwrap().len(), 2);
         assert_eq!(saved["cameras"][0]["camera_id"], "Furtka");
         assert_eq!(
@@ -797,7 +888,9 @@ mod camera_settings_tests {
         );
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(text.find("schema_version").unwrap() < text.find("\"nvr\"").unwrap());
-        assert!(text.find("\"nvr\"").unwrap() < text.find("\"cameras\"").unwrap());
+        assert!(text.find("\"nvr\"").unwrap() < text.find("\"schedule\"").unwrap());
+        assert!(text.find("\"schedule\"").unwrap() < text.find("\"cameras\"").unwrap());
+        assert!(text.find("\"cameras\"").unwrap() < text.find("\"dev\"").unwrap());
         let _ = std::fs::remove_file(path);
     }
 
@@ -817,7 +910,7 @@ mod camera_settings_tests {
             "cameras": []
         });
         let config: Config = serde_json::from_value(value).unwrap();
-        assert!(!config.demo_mode);
-        assert_eq!(config.dev_storage_budget_mb, DEFAULT_DEV_STORAGE_BUDGET_MB);
+        assert!(!config.dev.demo_mode);
+        assert_eq!(config.dev.storage_limit_mb, DEFAULT_DEV_STORAGE_BUDGET_MB);
     }
 }

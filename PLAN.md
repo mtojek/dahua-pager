@@ -28,8 +28,8 @@ Run the Mac app with `cargo run -p pager-macos`. It reads private
 
 ## Remaining work
 
-1. **Weekly schedule:** add Settings controls for ARMED, MUTED and DISARMED
-   periods, with local-time display and DST-safe transitions. See
+1. **Schedule port:** use the saved daily Auto-arm/Auto-disarm times on the
+   ESP32 clock. The Mac screen and mode transitions are implemented. See
    [docs/ui/schedule.md](docs/ui/schedule.md).
 2. **Storage limits:** implement the 90% occupancy threshold against actual SD
    capacity on the device. The Mac development build already has a configurable
