@@ -38,6 +38,7 @@ library includes an ILI9488 model with RGB565:
 
 The pinout below is copied from `arduino/lolin_s3_ili9488.ino` in `crd-esp32`.
 If this table conflicts with the source project, the source project wins.
+The hardware baseline was checked against `crd-esp32` revision `0c1d2c2`.
 
 | Component | GPIO |
 | --- | --- |
@@ -55,6 +56,27 @@ bus. Before implementing image display, verify the exact module and memory
 variant. ESP32-S3 internal memory is limited, and PSRAM availability depends on
 the module:
 [ESP-IDF external RAM guide](https://docs.espressif.com/projects/esp-idf/en/latest/esp32s3/api-guides/external-ram.html).
+
+### Verified hardware details
+
+- The source identifies the board as LOLIN S3 / ESP32-S3, but does not record
+  the exact board revision, flash size, or PSRAM size. Verify these from the
+  physical board before finalizing image-memory requirements.
+- The ILI9488 is 480 × 320, landscape with BGR ordering, and uses RGB666
+  (18-bit) over FSPI at 78 MHz. The pager renderer uses RGB565 pixels, so the
+  display backend must convert them correctly for the panel's RGB666 interface.
+- XPT2046 shares SCK/MOSI with the display, has its own MISO/CS/IRQ, and is read
+  at 1 MHz. The reference mapping inverts raw Y into screen X and maps raw X to
+  screen Y; its 200–3900 calibration is marked approximate.
+- The SD card is on a separate HSPI bus at 4 MHz.
+- MAX98357A uses I2S controller 0 at 22,050 Hz, 16-bit stereo, with eight DMA
+  buffers of 256 samples in the Arduino test. Treat buffer settings as a
+  starting point and measure them under the Rust firmware.
+- All five push buttons use `INPUT_PULLUP` and are active-low. Joystick X/Y are
+  analog inputs read at 12-bit resolution.
+- The existing Arduino sketch already provides a working sequential hardware
+  diagnostic. Use it as the reference when wiring or peripheral bring-up is in
+  doubt; do not create another diagnostic application by default.
 
 ## Implementation tasks
 
@@ -118,7 +140,9 @@ stopped, without exposing secrets or private camera details.
 
 Verify each peripheral individually before integrating its pager behavior.
 Use temporary diagnostics or serial output as needed, then remove one-off test
-code after integration.
+code after integration. The existing Arduino diagnostic in `crd-esp32` is the
+known-good comparison when a peripheral does not behave as expected; a second
+diagnostic app is not planned by default.
 
 #### Task 2.1 — LEDs
 
