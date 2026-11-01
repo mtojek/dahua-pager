@@ -184,7 +184,7 @@ mod tests {
         ui.apply(Action::Settings, &mut pager);
         assert_eq!(device.pointer(&ui, false, Some(CENTERS[2])), None);
         assert_eq!(device.hit_test(&ui, CENTERS[2]), Some(Action::Back));
-        assert_eq!(device.hit_test(&ui, CENTERS[0]), None);
+        assert_eq!(device.hit_test(&ui, CENTERS[0]), Some(Action::Previous));
     }
 
     #[test]

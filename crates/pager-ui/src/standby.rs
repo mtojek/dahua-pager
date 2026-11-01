@@ -265,7 +265,10 @@ impl Ui {
                 ]
             }
             Screen::AreaCameras => [None, None, Some(Action::Back), None],
-            Screen::AreaEditor => [None, None, Some(Action::Back), Some(Action::SaveAreas)],
+            Screen::AreaEditor if self.area_editor_snapshot_ready() => {
+                [None, None, Some(Action::Back), Some(Action::SaveAreas)]
+            }
+            Screen::AreaEditor => [None, None, Some(Action::Back), None],
         }
     }
 
@@ -716,6 +719,9 @@ impl Ui {
     pub fn begin_area_paint(&mut self, point: Point) {
         self.area_paint_value = None;
         self.last_painted_cell = None;
+        if !self.area_editor_snapshot_ready() {
+            return;
+        }
         let Some((row, col)) = self.area_cell_at(point) else {
             return;
         };
@@ -725,6 +731,10 @@ impl Ui {
     }
 
     pub fn continue_area_paint(&mut self, point: Point) {
+        if !self.area_editor_snapshot_ready() {
+            self.end_area_paint();
+            return;
+        }
         let Some((row, col)) = self.area_cell_at(point) else {
             return;
         };
@@ -733,7 +743,7 @@ impl Ui {
     }
 
     pub fn move_area_cursor(&mut self, dx: i8, dy: i8) {
-        if self.screen != Screen::AreaEditor {
+        if !self.area_editor_snapshot_ready() {
             return;
         }
         let (row, col) = self.area_cursor;
@@ -744,16 +754,27 @@ impl Ui {
     }
 
     pub fn toggle_area_cursor(&mut self) {
-        if self.screen == Screen::AreaEditor {
-            let (row, col) = self.area_cursor;
-            self.cameras[self.selected_camera].mask[row][col] =
-                !self.cameras[self.selected_camera].mask[row][col];
+        if !self.area_editor_snapshot_ready() {
+            return;
         }
+        let (row, col) = self.area_cursor;
+        self.cameras[self.selected_camera].mask[row][col] =
+            !self.cameras[self.selected_camera].mask[row][col];
     }
 
     pub fn end_area_paint(&mut self) {
         self.area_paint_value = None;
         self.last_painted_cell = None;
+    }
+
+    fn area_editor_snapshot_ready(&self) -> bool {
+        self.screen == Screen::AreaEditor
+            && self
+                .cameras
+                .get(self.selected_camera)
+                .is_some_and(|camera| {
+                    !camera.snapshot_loading && !camera.snapshot_error && camera.image.is_some()
+                })
     }
 
     fn area_cell_at(&self, point: Point) -> Option<(usize, usize)> {
@@ -822,12 +843,15 @@ impl Ui {
                 }
                 false
             }
-            Screen::AreaEditor => self.area_cell_at(point).is_some_and(|(row, col)| {
-                self.area_cursor = (row, col);
-                self.cameras[self.selected_camera].mask[row][col] =
-                    !self.cameras[self.selected_camera].mask[row][col];
-                true
-            }),
+            Screen::AreaEditor if self.area_editor_snapshot_ready() => {
+                self.area_cell_at(point).is_some_and(|(row, col)| {
+                    self.area_cursor = (row, col);
+                    self.cameras[self.selected_camera].mask[row][col] =
+                        !self.cameras[self.selected_camera].mask[row][col];
+                    true
+                })
+            }
+            Screen::AreaEditor => false,
             _ => false,
         }
     }
@@ -1324,8 +1348,12 @@ fn render_area_editor<D: DrawTarget<Color = Rgb565>>(
         display,
         if save_error {
             "Save failed"
-        } else {
+        } else if camera.image.is_some() {
             "Arrows move; Enter toggles cell"
+        } else if camera.snapshot_loading {
+            "Wait for snapshot"
+        } else {
+            "Back to cameras"
         },
         Point::new(16, 300),
         Alignment::Left,
@@ -1688,6 +1716,13 @@ mod tests {
         assert!(ui.lcd_click(Point::new(20, 50), &mut pager));
         assert_eq!(ui.screen, Screen::AreaEditor);
         assert!(!ui.cameras()[0].mask[0][0]);
+        ui.set_camera_image(
+            1,
+            Some(vec![
+                Rgb565::WHITE;
+                (AREA_IMAGE_WIDTH * AREA_IMAGE_HEIGHT) as usize
+            ]),
+        );
         assert!(ui.lcd_click(Point::new(16, 44), &mut pager));
         assert!(ui.cameras()[0].mask[0][0]);
         assert!(ui.lcd_click(Point::new(16, 44), &mut pager));
@@ -1733,6 +1768,13 @@ mod tests {
         let mut ui = Ui::default();
         ui.set_cameras(vec![AreaCamera::new(1, "Backyard")]);
         ui.screen = Screen::AreaEditor;
+        ui.set_camera_image(
+            1,
+            Some(vec![
+                Rgb565::WHITE;
+                (AREA_IMAGE_WIDTH * AREA_IMAGE_HEIGHT) as usize
+            ]),
+        );
 
         ui.begin_area_paint(Point::new(17, 35));
         ui.continue_area_paint(Point::new(31, 35));
@@ -1746,6 +1788,49 @@ mod tests {
         assert!(!ui.cameras()[0].mask[0][0]);
         assert!(!ui.cameras()[0].mask[0][1]);
         ui.end_area_paint();
+    }
+
+    #[test]
+    fn area_editor_ignores_grid_input_until_snapshot_is_loaded() {
+        let mut ui = Ui::default();
+        let mut pager = Pager::default();
+        ui.set_cameras(vec![AreaCamera::new(1, "Backyard")]);
+        ui.screen = Screen::AreaEditor;
+        ui.cameras[0].snapshot_loading = true;
+
+        assert_eq!(ui.physical_actions()[3], None);
+        assert!(!ui.lcd_click(Point::new(16, 44), &mut pager));
+        ui.move_area_cursor(1, 1);
+        ui.toggle_area_cursor();
+        ui.begin_area_paint(Point::new(17, 35));
+        ui.continue_area_paint(Point::new(31, 35));
+
+        assert_eq!(ui.area_cursor, (0, 0));
+        assert!(
+            ui.cameras[0]
+                .mask
+                .iter()
+                .flatten()
+                .all(|selected| !selected)
+        );
+
+        ui.set_camera_image(
+            1,
+            Some(vec![
+                Rgb565::WHITE;
+                (AREA_IMAGE_WIDTH * AREA_IMAGE_HEIGHT) as usize
+            ]),
+        );
+        assert_eq!(ui.physical_actions()[3], Some(Action::SaveAreas));
+        assert!(ui.lcd_click(Point::new(16, 44), &mut pager));
+        assert!(ui.cameras[0].mask[0][0]);
+
+        ui.set_camera_image(1, None);
+        assert!(ui.cameras[0].snapshot_error);
+        assert_eq!(ui.physical_actions()[3], None);
+        assert!(!ui.lcd_click(Point::new(16, 44), &mut pager));
+        ui.toggle_area_cursor();
+        assert!(ui.cameras[0].mask[0][0]);
     }
 
     #[test]
@@ -1777,8 +1862,16 @@ mod tests {
         assert!(ui.cameras()[1].snapshot_loading);
         assert_eq!(
             ui.physical_actions(),
-            [None, None, Some(Action::Back), Some(Action::SaveAreas)]
+            [None, None, Some(Action::Back), None]
         );
+        ui.set_camera_image(
+            2,
+            Some(vec![
+                Rgb565::WHITE;
+                (AREA_IMAGE_WIDTH * AREA_IMAGE_HEIGHT) as usize
+            ]),
+        );
+        assert_eq!(ui.physical_actions()[3], Some(Action::SaveAreas));
     }
 
     #[test]
