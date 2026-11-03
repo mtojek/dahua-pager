@@ -1,0 +1,27 @@
+[package]
+name = "pager-esp32"
+version = "0.1.0"
+authors = ["Marcin Tojek <mtojek@users.noreply.github.com>"]
+edition = "2021"
+rust-version = "1.82"
+
+[[bin]]
+name = "pager-esp32"
+harness = false # ESP-IDF provides the program entry point.
+
+[profile.release]
+opt-level = "s"
+
+[profile.dev]
+debug = true    # Symbols are nice, and they don't increase the size on Flash
+opt-level = "z"
+
+[dependencies]
+log = "0.4"
+esp-idf-svc = "0.53"
+
+[build-dependencies]
+embuild = "0.33.5"
+
+[workspace]
+resolver = "2"

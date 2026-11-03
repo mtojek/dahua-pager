@@ -928,7 +928,7 @@ impl Ui {
                 )
             } else {
                 match self.screen {
-                    Screen::Alarm => "HUMAN DETECTED".to_owned(),
+                    Screen::Alarm => "Human".to_owned(),
                     Screen::History => "HISTORY".to_owned(),
                     Screen::Settings => "SETTINGS".to_owned(),
                     Screen::Schedule => "SCHEDULE".to_owned(),

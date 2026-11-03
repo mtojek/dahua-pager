@@ -1,7 +1,10 @@
 # Dahua Pager
 
 macOS pager for Dahua NVR alarms. Development starts on the Mac; an ESP32-S3
-port is planned.
+firmware is in early bring-up.
+
+For ESP32-S3 setup, build and flash instructions, see
+[`apps/pager-esp32/README.md`](apps/pager-esp32/README.md).
 
 ## Run
 
