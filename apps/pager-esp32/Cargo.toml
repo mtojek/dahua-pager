@@ -19,6 +19,10 @@ opt-level = "z"
 [dependencies]
 log = "0.4"
 esp-idf-svc = "0.53"
+embedded-graphics = "0.8.2"
+pager-core = { path = "../../crates/pager-core" }
+pager-ui = { path = "../../crates/pager-ui" }
+pager-dahua = { path = "../../crates/pager-dahua", default-features = false }
 
 [build-dependencies]
 embuild = "0.33.5"

@@ -1,28 +1,39 @@
 //! Dahua communication, independent of UI and alarm policy.
+#[cfg(feature = "native")]
 mod subscription;
+#[cfg(feature = "native")]
 use reqwest::{
-    StatusCode, Url,
+    StatusCode,
     blocking::{Client, Response},
     header::{CONTENT_TYPE, WWW_AUTHENTICATE},
     redirect::Policy,
 };
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
+#[cfg(feature = "native")]
+use std::time::Duration;
 use std::{
     fmt,
     io::{self, BufRead, BufReader, Read, Write},
     path::Path,
-    time::Duration,
 };
+#[cfg(feature = "native")]
 pub use subscription::{ConnectionState, RetryPolicy, Subscription};
+#[cfg(feature = "native")]
+use url::Url;
 
+#[cfg(feature = "native")]
 const EVENTS_PATH: &str = "/cgi-bin/eventManager.cgi?action=attach&codes=%5BAll%5D&heartbeat=5";
+#[cfg(feature = "native")]
 const SNAPSHOT_PATH: &str = "/cgi-bin/snapshot.cgi";
+#[cfg(feature = "native")]
 const CAMERA_LIST_PATH: &str = "/cgi-bin/LogicDeviceManager.cgi?action=getCameraAll";
+#[cfg(feature = "native")]
 const CHANNEL_TITLES_PATH: &str = "/cgi-bin/configManager.cgi?action=getConfig&name=ChannelTitle";
 
 const MAX_PART: usize = 256 * 1024;
 const MAX_HEADERS: usize = 16 * 1024;
+#[cfg(feature = "native")]
 const MAX_SNAPSHOT: u64 = 8 * 1024 * 1024;
 const AREA_MASK_BITS: usize = 32 * 20;
 const AREA_MASK_BYTES: usize = AREA_MASK_BITS / 8;
@@ -257,7 +268,7 @@ impl Config {
         {
             return Err(Error::Config);
         }
-        base_url(&self.nvr.base_url)?;
+        validate_base_url(&self.nvr.base_url)?;
         for camera in &self.cameras {
             camera.decode_mask()?;
         }
@@ -317,18 +328,61 @@ impl Config {
         result
     }
 }
-fn base_url(value: &str) -> Result<Url> {
-    let url = Url::parse(value).map_err(|_| Error::Config)?;
-    if !matches!(url.scheme(), "http" | "https")
-        || url.host_str().is_none()
-        || !url.username().is_empty()
-        || url.password().is_some()
-        || url.path() != "/"
-        || url.query().is_some()
-        || url.fragment().is_some()
+fn validate_base_url(value: &str) -> Result<()> {
+    let (scheme, remainder) = value.split_once("://").ok_or(Error::Config)?;
+    if !scheme.eq_ignore_ascii_case("http") && !scheme.eq_ignore_ascii_case("https") {
+        return Err(Error::Config);
+    }
+    let authority = remainder.strip_suffix('/').unwrap_or(remainder);
+    if authority.is_empty()
+        || authority.contains(['/', '?', '#', '@'])
+        || authority
+            .bytes()
+            .any(|byte| byte.is_ascii_whitespace() || byte.is_ascii_control())
     {
         return Err(Error::Config);
     }
+
+    let (host, port, is_ipv6) = if let Some(bracketed) = authority.strip_prefix('[') {
+        let (address, suffix) = bracketed.split_once(']').ok_or(Error::Config)?;
+        address
+            .parse::<std::net::Ipv6Addr>()
+            .map_err(|_| Error::Config)?;
+        let port = if suffix.is_empty() {
+            None
+        } else {
+            Some(suffix.strip_prefix(':').ok_or(Error::Config)?)
+        };
+        (address, port, true)
+    } else {
+        match authority.rsplit_once(':') {
+            Some((host, port)) if !host.contains(':') => (host, Some(port), false),
+            Some(_) => return Err(Error::Config),
+            None => (authority, None, false),
+        }
+    };
+
+    if host.is_empty()
+        || (!is_ipv6
+            && host
+                .bytes()
+                .any(|byte| !(byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-'))))
+    {
+        return Err(Error::Config);
+    }
+    if let Some(port) = port {
+        if port.is_empty() || !port.bytes().all(|byte| byte.is_ascii_digit()) {
+            return Err(Error::Config);
+        }
+        port.parse::<u16>().map_err(|_| Error::Config)?;
+    }
+    Ok(())
+}
+
+#[cfg(feature = "native")]
+fn base_url(value: &str) -> Result<Url> {
+    validate_base_url(value)?;
+    let url = Url::parse(value).map_err(|_| Error::Config)?;
     Ok(url)
 }
 
@@ -468,6 +522,7 @@ fn map_io(error: io::Error) -> Error {
     }
 }
 
+#[cfg(feature = "native")]
 #[derive(Clone)]
 pub struct DahuaClient {
     client: Client,
@@ -475,6 +530,7 @@ pub struct DahuaClient {
     config: NvrConfig,
     base: Url,
 }
+#[cfg(feature = "native")]
 impl DahuaClient {
     /// Target for platform reachability checks; never log or publish this value.
     pub fn network_host(&self) -> &str {
@@ -673,7 +729,7 @@ struct CameraFields {
     address: Option<String>,
 }
 
-fn parse_camera_list(bytes: &[u8]) -> Result<Vec<Camera>> {
+pub fn parse_camera_list(bytes: &[u8]) -> Result<Vec<Camera>> {
     let text = std::str::from_utf8(bytes).map_err(|_| Error::Protocol)?;
     let mut records = std::collections::BTreeMap::<u32, CameraFields>::new();
     for line in text.lines().filter(|line| !line.trim().is_empty()) {
@@ -739,6 +795,7 @@ fn parse_camera_list(bytes: &[u8]) -> Result<Vec<Camera>> {
     Ok(cameras)
 }
 
+#[cfg(feature = "native")]
 fn read_bounded(mut response: Response, max_size: u64) -> Result<Vec<u8>> {
     if response
         .content_length()
@@ -758,7 +815,7 @@ fn read_bounded(mut response: Response, max_size: u64) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
-fn parse_channel_titles(bytes: &[u8]) -> Result<std::collections::BTreeMap<u32, String>> {
+pub fn parse_channel_titles(bytes: &[u8]) -> Result<std::collections::BTreeMap<u32, String>> {
     let text = std::str::from_utf8(bytes).map_err(|_| Error::Protocol)?;
     let mut titles = std::collections::BTreeMap::new();
     for line in text.lines().filter(|line| !line.trim().is_empty()) {
@@ -789,6 +846,7 @@ fn parse_bool(value: &str) -> Result<bool> {
     }
 }
 
+#[cfg(feature = "native")]
 fn event_boundary(headers: &reqwest::header::HeaderMap) -> Result<String> {
     let content_type = headers
         .get(CONTENT_TYPE)
