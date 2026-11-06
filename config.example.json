@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "nvr": {
-    "base_url": "https://NVR_ADDRESS:443",
+    "base_url": "https://nvr.example.invalid:443",
     "username": "",
     "password": "",
     "auth": "digest",
