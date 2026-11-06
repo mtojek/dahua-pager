@@ -1,8 +1,9 @@
 # ESP32-S3 firmware
 
-This is the ESP-IDF Rust firmware for the LOLIN S3. It currently boots and
-prints `Hello, world!` to the serial console; pager features are not ported yet.
-Hardware details and the implementation sequence are in
+This is the ESP-IDF Rust firmware for the LOLIN S3. It initializes the
+ILI9488 480x320 LCD and displays white, red, green, blue, and black test bands.
+Other pager hardware and application features are not ported yet. Hardware
+details and the implementation sequence are in
 [`docs/esp32-port-plan.md`](../../docs/esp32-port-plan.md).
 
 ## Build
@@ -34,5 +35,9 @@ Connect the ESP32-S3 over USB, then run from this directory:
 cargo espflash flash --target xtensa-esp32s3-espidf --monitor
 ```
 
-The serial monitor should show `Hello, world!` after startup. The current
-partition table reserves a 1,536,000-byte app slot for firmware development.
+The serial monitor logs the LCD reset and initialization steps, confirms when
+the color pattern is drawn, and reports uptime and free heap every 10 seconds.
+The LCD wiring matches the known-working Arduino project: CS GPIO3, DC GPIO10,
+reset GPIO9, backlight GPIO14, MOSI GPIO11, and SCK GPIO12. The current
+SPI clock is 40 MHz. The current partition table reserves a 1,536,000-byte app
+slot for firmware development.
