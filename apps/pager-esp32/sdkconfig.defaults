@@ -8,5 +8,8 @@ CONFIG_FREERTOS_IDLE_TASK_STACKSIZE=4096
 # Set the default stack size for Rust-created threads.
 CONFIG_PTHREAD_TASK_STACK_SIZE_DEFAULT=4096
 
+# Keep startup diagnostics visible on the serial console.
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y
+
 # Use the largest standard single-app partition for the current firmware image.
 CONFIG_PARTITION_TABLE_SINGLE_APP_LARGE=y
