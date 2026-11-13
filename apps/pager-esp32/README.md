@@ -1,9 +1,10 @@
 # ESP32-S3 firmware
 
-This is the ESP-IDF Rust firmware for the LOLIN S3. It initializes the
-ILI9488 480x320 LCD and displays white, red, green, blue, and black test bands.
-Other pager hardware and application features are not ported yet. Hardware
-details and the implementation sequence are in
+This is the ESP-IDF Rust firmware for the LOLIN S3. At startup, it briefly
+lights the red and green status LEDs, then initializes the ILI9488 480x320 LCD
+and displays white, red, green, blue, and black test bands. Other pager
+hardware and application features are not ported yet. Hardware details and
+the implementation sequence are in
 [`docs/esp32-port-plan.md`](../../docs/esp32-port-plan.md).
 
 ## Build

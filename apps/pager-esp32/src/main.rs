@@ -1,3 +1,4 @@
+mod leds;
 mod lcd;
 
 fn main() {
@@ -11,7 +12,7 @@ fn main() {
     log::info!("[APP] target=ESP32-S3; ESP-IDF=v6.1");
     log::info!("[INIT] ESP-IDF Rust logger initialized");
     log::info!("[INIT] pager-core, pager-ui, and pager-dahua are build dependencies");
-    log::warn!("[INIT] buttons, LEDs, audio, Wi-Fi, and storage are not initialized yet");
+    log::warn!("[INIT] buttons, audio, Wi-Fi, and storage are not initialized yet");
 
     let peripherals = match esp_idf_svc::hal::peripherals::Peripherals::take() {
         Ok(peripherals) => peripherals,
@@ -20,7 +21,31 @@ fn main() {
             return;
         }
     };
-    let mut display = match lcd::Lcd::new(peripherals) {
+    let mut status_leds = match leds::StatusLeds::new(
+        peripherals.pins.gpio1,
+        peripherals.pins.gpio2,
+    ) {
+        Ok(status_leds) => status_leds,
+        Err(error) => {
+            log::error!("[LED] failed to configure status LEDs: {error}");
+            return;
+        }
+    };
+    if let Err(error) = status_leds.startup_test() {
+        log::error!("[LED] startup LED test failed: {error}");
+        return;
+    }
+
+    let mut display = match lcd::Lcd::new(
+        peripherals.spi2,
+        peripherals.pins.gpio12,
+        peripherals.pins.gpio11,
+        peripherals.pins.gpio13,
+        peripherals.pins.gpio3,
+        peripherals.pins.gpio10,
+        peripherals.pins.gpio9,
+        peripherals.pins.gpio14,
+    ) {
         Ok(display) => display,
         Err(error) => {
             log::error!("[LCD] failed to configure SPI/GPIO: {error}");

@@ -3,8 +3,7 @@
 use esp_idf_svc::{
     hal::{
         delay::FreeRtos,
-        gpio::{Output, PinDriver},
-        peripherals::Peripherals,
+        gpio::{InputPin, Output, OutputPin, PinDriver},
         spi::{config, Dma, SpiBusDriver, SpiDriver, SpiDriverConfig, SPI2},
         units::FromValueType,
     },
@@ -24,12 +23,21 @@ pub struct Lcd<'d> {
 }
 
 impl<'d> Lcd<'d> {
-    pub fn new(peripherals: Peripherals) -> Result<Self, EspError> {
+    pub fn new(
+        spi_peripheral: SPI2<'d>,
+        sck: impl OutputPin + 'd,
+        mosi: impl OutputPin + 'd,
+        miso: impl InputPin + 'd,
+        cs_pin: impl OutputPin + 'd,
+        dc_pin: impl OutputPin + 'd,
+        reset_pin: impl OutputPin + 'd,
+        backlight_pin: impl OutputPin + 'd,
+    ) -> Result<Self, EspError> {
         let driver = SpiDriver::new::<SPI2>(
-            peripherals.spi2,
-            peripherals.pins.gpio12, // LCD SCK
-            peripherals.pins.gpio11, // LCD MOSI
-            Some(peripherals.pins.gpio13), // Shared with the touch controller
+            spi_peripheral,
+            sck,
+            mosi,
+            Some(miso),
             &SpiDriverConfig::new().dma(Dma::Auto(4096)),
         )?;
         let spi_config = config::Config::new()
@@ -37,10 +45,10 @@ impl<'d> Lcd<'d> {
             .write_only(true);
         let spi = SpiBusDriver::new(driver, &spi_config)?;
 
-        let mut cs = PinDriver::output(peripherals.pins.gpio3)?;
-        let mut dc = PinDriver::output(peripherals.pins.gpio10)?;
-        let reset = PinDriver::output(peripherals.pins.gpio9)?;
-        let backlight = PinDriver::output(peripherals.pins.gpio14)?;
+        let mut cs = PinDriver::output(cs_pin)?;
+        let mut dc = PinDriver::output(dc_pin)?;
+        let reset = PinDriver::output(reset_pin)?;
+        let backlight = PinDriver::output(backlight_pin)?;
 
         cs.set_high()?;
         dc.set_high()?;
