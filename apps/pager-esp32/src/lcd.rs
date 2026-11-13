@@ -3,23 +3,34 @@
 use esp_idf_svc::{
     hal::{
         delay::FreeRtos,
-        gpio::{InputPin, Output, OutputPin, PinDriver},
-        spi::{config, Dma, SpiBusDriver, SpiDriver, SpiDriverConfig, SPI2},
+        gpio::{AnyOutputPin, Input, InputPin, Output, OutputPin, PinDriver, Pull},
+        spi::{config, Dma, SpiDeviceDriver, SpiDriver, SpiDriverConfig, SPI2},
         units::FromValueType,
     },
     sys::EspError,
 };
+use std::sync::Arc;
 
 const WIDTH: usize = 480;
 const HEIGHT: usize = 320;
 const SPI_CLOCK_MHZ: u32 = 40;
+const TOUCH_CLOCK_MHZ: u32 = 1;
+const TOUCH_MIN: u16 = 200;
+const TOUCH_MAX: u16 = 3900;
+const TOUCH_SAMPLES: u32 = 8;
 
 pub struct Lcd<'d> {
-    spi: SpiBusDriver<'d, SpiDriver<'d>>,
+    spi: SpiDeviceDriver<'d, Arc<SpiDriver<'d>>>,
+    touch_spi: SpiDeviceDriver<'d, Arc<SpiDriver<'d>>>,
     cs: PinDriver<'d, Output>,
     dc: PinDriver<'d, Output>,
     reset: PinDriver<'d, Output>,
     backlight: PinDriver<'d, Output>,
+    touch_cs: PinDriver<'d, Output>,
+    touch_irq: PinDriver<'d, Input>,
+    last_touch_log: Option<(i32, i32)>,
+    touch_irq_was_low: bool,
+    touch_invalid_sample_logged: bool,
 }
 
 impl<'d> Lcd<'d> {
@@ -32,34 +43,135 @@ impl<'d> Lcd<'d> {
         dc_pin: impl OutputPin + 'd,
         reset_pin: impl OutputPin + 'd,
         backlight_pin: impl OutputPin + 'd,
+        touch_cs_pin: impl OutputPin + 'd,
+        touch_irq_pin: impl InputPin + 'd,
     ) -> Result<Self, EspError> {
-        let driver = SpiDriver::new::<SPI2>(
+        let driver = Arc::new(SpiDriver::new::<SPI2>(
             spi_peripheral,
             sck,
             mosi,
             Some(miso),
             &SpiDriverConfig::new().dma(Dma::Auto(4096)),
-        )?;
-        let spi_config = config::Config::new()
+        )?);
+        let lcd_config = config::Config::new()
             .baudrate(SPI_CLOCK_MHZ.MHz().into())
             .write_only(true);
-        let spi = SpiBusDriver::new(driver, &spi_config)?;
+        let touch_config = config::Config::new().baudrate(TOUCH_CLOCK_MHZ.MHz().into());
+        let spi = SpiDeviceDriver::new(
+            Arc::clone(&driver),
+            Option::<AnyOutputPin>::None,
+            &lcd_config,
+        )?;
+        let touch_spi = SpiDeviceDriver::new(
+            driver,
+            Option::<AnyOutputPin>::None,
+            &touch_config,
+        )?;
 
         let mut cs = PinDriver::output(cs_pin)?;
         let mut dc = PinDriver::output(dc_pin)?;
         let reset = PinDriver::output(reset_pin)?;
         let backlight = PinDriver::output(backlight_pin)?;
+        let mut touch_cs = PinDriver::output(touch_cs_pin)?;
+        let touch_irq = PinDriver::input(touch_irq_pin, Pull::Up)?;
 
         cs.set_high()?;
         dc.set_high()?;
+        touch_cs.set_high()?;
+        log::info!(
+            "[TOUCH] XPT2046 ready CS=GPIO8 IRQ=GPIO18 MISO=GPIO13 SPI={} MHz IRQ={}",
+            TOUCH_CLOCK_MHZ,
+            if touch_irq.is_high() { "HIGH" } else { "LOW" }
+        );
 
         Ok(Self {
             spi,
+            touch_spi,
             cs,
             dc,
             reset,
             backlight,
+            touch_cs,
+            touch_irq,
+            last_touch_log: None,
+            touch_irq_was_low: false,
+            touch_invalid_sample_logged: false,
         })
+    }
+
+    /// Polls the XPT2046 once and logs touch-down, significant movement, and release.
+    pub fn poll_touch(&mut self) -> Result<(), EspError> {
+        let irq_high = self.touch_irq.is_high();
+        if irq_high {
+            if self.touch_irq_was_low {
+                self.touch_irq_was_low = false;
+                log::info!("[TOUCH] RELEASED");
+            }
+            self.last_touch_log = None;
+            self.touch_invalid_sample_logged = false;
+            return Ok(());
+        }
+
+        if !irq_high && !self.touch_irq_was_low {
+            log::info!("[TOUCH] IRQ=LOW; reading XPT2046");
+            self.touch_irq_was_low = true;
+        }
+
+        self.cs.set_high()?;
+        self.touch_cs.set_low()?;
+        let sample = (|| {
+            self.read_touch_12bit(0xD0)?; // Discard first conversion after IRQ
+            let mut sum_x = 0_u32;
+            let mut sum_y = 0_u32;
+            for _ in 0..TOUCH_SAMPLES {
+                sum_x += u32::from(self.read_touch_12bit(0xD0)?);
+                sum_y += u32::from(self.read_touch_12bit(0x90)?);
+            }
+            Ok::<_, EspError>((
+                (sum_x / TOUCH_SAMPLES) as u16,
+                (sum_y / TOUCH_SAMPLES) as u16,
+            ))
+        })();
+        let release_result = self.touch_cs.set_high();
+        let (raw_x, raw_y) = sample?;
+        release_result?;
+
+        if raw_x < 100 || raw_y < 100 {
+            if !self.touch_invalid_sample_logged {
+                log::warn!(
+                    "[TOUCH] raw sample below threshold raw_x={} raw_y={}; check MISO/CS wiring",
+                    raw_x,
+                    raw_y
+                );
+                self.touch_invalid_sample_logged = true;
+            }
+            return Ok(());
+        }
+        self.touch_invalid_sample_logged = false;
+
+        let x = map_clamped(raw_y, TOUCH_MIN, TOUCH_MAX, (WIDTH - 1) as i32, 0);
+        let y = map_clamped(raw_x, TOUCH_MIN, TOUCH_MAX, 0, (HEIGHT - 1) as i32);
+        let should_log = self.last_touch_log.is_none_or(|(last_x, last_y)| {
+            (x - last_x).abs() >= 8 || (y - last_y).abs() >= 8
+        });
+        if should_log {
+            log::info!(
+                "[TOUCH] PRESSED raw_x={} raw_y={} -> screen_x={} screen_y={}",
+                raw_x,
+                raw_y,
+                x,
+                y
+            );
+            self.last_touch_log = Some((x, y));
+        }
+        Ok(())
+    }
+
+    fn read_touch_12bit(&mut self, command: u8) -> Result<u16, EspError> {
+        self.touch_spi.write(&[command])?;
+        let mut response = [0_u8; 2];
+        self.touch_spi.transfer(&mut response, &[0, 0])?;
+        Ok((u16::from_be_bytes(response) >> 3) & 0x0FFF)
     }
 
     pub fn initialize_and_show_test_pattern(&mut self) -> Result<(), EspError> {
@@ -205,4 +317,12 @@ impl<'d> Lcd<'d> {
         }
         Ok(())
     }
+}
+
+fn map_clamped(value: u16, input_min: u16, input_max: u16, output_min: i32, output_max: i32) -> i32 {
+    let value = value.clamp(input_min, input_max);
+    let input_span = i64::from(input_max - input_min);
+    let output_span = i64::from(output_max - output_min);
+    let mapped = (i64::from(value - input_min) * output_span) / input_span;
+    (i64::from(output_min) + mapped) as i32
 }

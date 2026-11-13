@@ -13,7 +13,7 @@ fn main() {
     log::info!("[APP] target=ESP32-S3; ESP-IDF=v6.1");
     log::info!("[INIT] ESP-IDF Rust logger initialized");
     log::info!("[INIT] pager-core, pager-ui, and pager-dahua are build dependencies");
-    log::warn!("[INIT] touch, audio, Wi-Fi, and storage are not initialized yet");
+    log::warn!("[INIT] audio, Wi-Fi, and storage are not initialized yet");
 
     let peripherals = match esp_idf_svc::hal::peripherals::Peripherals::take() {
         Ok(peripherals) => peripherals,
@@ -94,6 +94,8 @@ fn main() {
         peripherals.pins.gpio10,
         peripherals.pins.gpio9,
         peripherals.pins.gpio14,
+        peripherals.pins.gpio8,
+        peripherals.pins.gpio18,
     ) {
         Ok(display) => display,
         Err(error) => {
@@ -130,6 +132,11 @@ fn main() {
     loop {
         for button in &mut buttons {
             button.poll();
+        }
+
+        if let Err(error) = display.poll_touch() {
+            log::error!("[TOUCH] read failed: {error}");
+            return;
         }
 
         if last_axis_log.elapsed() >= std::time::Duration::from_millis(100) {
