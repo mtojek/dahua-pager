@@ -1,6 +1,7 @@
 mod inputs;
 mod leds;
 mod lcd;
+mod storage;
 
 fn main() {
     // Required so esp-idf-sys runtime patches are linked into the firmware.
@@ -13,7 +14,7 @@ fn main() {
     log::info!("[APP] target=ESP32-S3; ESP-IDF=v6.1");
     log::info!("[INIT] ESP-IDF Rust logger initialized");
     log::info!("[INIT] pager-core, pager-ui, and pager-dahua are build dependencies");
-    log::warn!("[INIT] audio, Wi-Fi, and storage are not initialized yet");
+    log::warn!("[INIT] audio and Wi-Fi are not initialized yet");
 
     let peripherals = match esp_idf_svc::hal::peripherals::Peripherals::take() {
         Ok(peripherals) => peripherals,
@@ -84,6 +85,20 @@ fn main() {
         }
     };
     log::info!("[INPUT] buttons use 30 ms debounce; joystick axes use 12-bit ADC1 reads");
+
+    let _storage = match storage::run_sd_self_test(
+        peripherals.spi3,
+        peripherals.pins.gpio39,
+        peripherals.pins.gpio41,
+        peripherals.pins.gpio40,
+        peripherals.pins.gpio42,
+    ) {
+        Ok(storage) => Some(storage),
+        Err(error) => {
+            log::error!("[STORAGE] microSD self-test failed: {error}");
+            None
+        }
+    };
 
     let mut display = match lcd::Lcd::new(
         peripherals.spi2,

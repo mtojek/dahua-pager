@@ -43,5 +43,7 @@ the color pattern is drawn, and reports uptime and free heap every 10 seconds.
 The LCD wiring matches the known-working Arduino project: CS GPIO3, DC GPIO10,
 reset GPIO9, backlight GPIO14, MOSI GPIO11, and SCK GPIO12. The touch panel
 uses CS GPIO8, IRQ GPIO18, and MISO GPIO13 on the same SPI bus, with the bus
-configured at 1 MHz for touch and 40 MHz for LCD. The current partition table
-reserves a 1,536,000-byte app slot for firmware development.
+configured at 1 MHz for touch and 40 MHz for LCD. At startup, the SD card on
+GPIO39–42 is mounted without formatting and remains mounted for runtime; a
+uniquely named temporary file is written, verified, and deleted. The current partition table reserves a
+1,536,000-byte app slot for firmware development.
