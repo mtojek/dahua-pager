@@ -3,9 +3,10 @@
 This is the ESP-IDF Rust firmware for the LOLIN S3. At startup, it briefly
 lights the red and green status LEDs, then initializes the ILI9488 480x320 LCD
 and displays white, red, green, blue, and black test bands. It monitors the
-four action buttons, joystick button, joystick axes, and XPT2046 touch panel,
-logging stable input changes and mapped screen coordinates. Other pager
-hardware and application features are not ported yet. Hardware details and
+four action buttons, joystick button, joystick axes, and XPT2046 touch panel.
+Each debounced button press plays a short, distinct tone through the MAX98357A;
+the amplifier stays muted at startup. Other pager application features are not
+ported yet. Hardware details and
 the implementation sequence are in
 [`docs/esp32-port-plan.md`](../../docs/esp32-port-plan.md).
 

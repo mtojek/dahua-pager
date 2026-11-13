@@ -1,6 +1,7 @@
+mod audio;
 mod inputs;
-mod leds;
 mod lcd;
+mod leds;
 mod storage;
 
 fn main() {
@@ -14,7 +15,7 @@ fn main() {
     log::info!("[APP] target=ESP32-S3; ESP-IDF=v6.1");
     log::info!("[INIT] ESP-IDF Rust logger initialized");
     log::info!("[INIT] pager-core, pager-ui, and pager-dahua are build dependencies");
-    log::warn!("[INIT] audio and Wi-Fi are not initialized yet");
+    log::warn!("[INIT] Wi-Fi is not initialized yet");
 
     let peripherals = match esp_idf_svc::hal::peripherals::Peripherals::take() {
         Ok(peripherals) => peripherals,
@@ -23,16 +24,14 @@ fn main() {
             return;
         }
     };
-    let mut status_leds = match leds::StatusLeds::new(
-        peripherals.pins.gpio1,
-        peripherals.pins.gpio2,
-    ) {
-        Ok(status_leds) => status_leds,
-        Err(error) => {
-            log::error!("[LED] failed to configure status LEDs: {error}");
-            return;
-        }
-    };
+    let mut status_leds =
+        match leds::StatusLeds::new(peripherals.pins.gpio1, peripherals.pins.gpio2) {
+            Ok(status_leds) => status_leds,
+            Err(error) => {
+                log::error!("[LED] failed to configure status LEDs: {error}");
+                return;
+            }
+        };
     if let Err(error) = status_leds.startup_test() {
         log::error!("[LED] startup LED test failed: {error}");
         return;
@@ -85,6 +84,20 @@ fn main() {
         }
     };
     log::info!("[INPUT] buttons use 30 ms debounce; joystick axes use 12-bit ADC1 reads");
+
+    let mut button_audio = match audio::ButtonAudio::new(
+        peripherals.i2s0,
+        peripherals.pins.gpio48,
+        peripherals.pins.gpio47,
+        peripherals.pins.gpio45,
+        peripherals.pins.gpio21,
+    ) {
+        Ok(audio) => Some(audio),
+        Err(error) => {
+            log::error!("[AUDIO] button sound test unavailable: {error}");
+            None
+        }
+    };
 
     let _storage = match storage::run_sd_self_test(
         peripherals.spi3,
@@ -145,8 +158,14 @@ fn main() {
     log::info!("[JOYSTICK] initial raw ADC values x={last_x} y={last_y}; move stick to test");
 
     loop {
-        for button in &mut buttons {
-            button.poll();
+        for (button_index, button) in buttons.iter_mut().enumerate() {
+            if button.poll() {
+                if let Some(audio) = &mut button_audio {
+                    if let Err(error) = audio.play_button_tone(button_index) {
+                        log::error!("[AUDIO] button sound failed: {error}");
+                    }
+                }
+            }
         }
 
         if let Err(error) = display.poll_touch() {

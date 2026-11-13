@@ -2,7 +2,7 @@
 
 use std::time::{Duration, Instant};
 
-use esp_idf_svc::hal::gpio::{Gpio4, Gpio7, Gpio15, Gpio16, Gpio17, Input, PinDriver, Pull};
+use esp_idf_svc::hal::gpio::{Gpio15, Gpio16, Gpio17, Gpio4, Gpio7, Input, PinDriver, Pull};
 use esp_idf_svc::sys::EspError;
 
 const DEBOUNCE_TIME: Duration = Duration::from_millis(30);
@@ -17,7 +17,11 @@ pub struct Button<'d> {
 }
 
 impl<'d> Button<'d> {
-    fn new(name: &'static str, pin_number: u8, pin: impl esp_idf_svc::hal::gpio::InputPin + 'd) -> Result<Self, EspError> {
+    fn new(
+        name: &'static str,
+        pin_number: u8,
+        pin: impl esp_idf_svc::hal::gpio::InputPin + 'd,
+    ) -> Result<Self, EspError> {
         let input = PinDriver::input(pin, Pull::Up)?;
         let pressed = input.is_low();
         log::info!(
@@ -36,11 +40,13 @@ impl<'d> Button<'d> {
         })
     }
 
-    pub fn poll(&mut self) {
+    /// Returns true once when a debounced press is detected.
+    pub fn poll(&mut self) -> bool {
         let sampled_pressed = self.input.is_low();
         if sampled_pressed != self.candidate_pressed {
             self.candidate_pressed = sampled_pressed;
             self.candidate_since = Instant::now();
+            false
         } else if self.candidate_pressed != self.stable_pressed
             && self.candidate_since.elapsed() >= DEBOUNCE_TIME
         {
@@ -51,6 +57,9 @@ impl<'d> Button<'d> {
                 self.pin,
                 state_name(self.stable_pressed)
             );
+            self.stable_pressed
+        } else {
+            false
         }
     }
 }
@@ -72,5 +81,9 @@ pub fn create_buttons<'d>(
 }
 
 fn state_name(pressed: bool) -> &'static str {
-    if pressed { "PRESSED" } else { "RELEASED" }
+    if pressed {
+        "PRESSED"
+    } else {
+        "RELEASED"
+    }
 }
