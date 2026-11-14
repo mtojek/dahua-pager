@@ -70,6 +70,22 @@ pub struct Config {
     pub cameras: Vec<CameraSettings>,
     #[serde(default)]
     pub dev: DevSettings,
+    #[serde(default)]
+    pub esp32: Esp32Settings,
+}
+
+#[derive(Clone, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Esp32Settings {
+    #[serde(default)]
+    pub wifi: Option<WifiSettings>,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WifiSettings {
+    pub ssid: String,
+    pub password: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -285,6 +301,7 @@ impl Config {
             cameras: cameras.to_vec(),
             dev: current.dev,
             schedule: current.schedule,
+            esp32: current.esp32,
         };
         Self::save_updated(path, &updated)
     }
@@ -301,6 +318,7 @@ impl Config {
             cameras: current.cameras,
             dev: current.dev,
             schedule: schedule.clone(),
+            esp32: current.esp32,
         };
         Self::save_updated(path, &updated)
     }
@@ -880,7 +898,7 @@ fn event_boundary(headers: &reqwest::header::HeaderMap) -> Result<String> {
 
 #[cfg(test)]
 mod camera_settings_tests {
-    use super::{CameraSettings, Config, DEFAULT_DEV_STORAGE_BUDGET_MB};
+    use super::{CameraSettings, Config, DEFAULT_DEV_STORAGE_BUDGET_MB, ScheduleSettings};
 
     #[test]
     fn area_mask_round_trips_as_compact_hex() {
@@ -925,7 +943,7 @@ mod camera_settings_tests {
             std::thread::current().name().unwrap_or("test")
         ));
         let source = format!(
-            r#"{{"schema_version":1,"nvr":{{"base_url":"https://example.invalid","username":"test","password":"secret","auth":"digest","connect_timeout_secs":5,"session_timeout_secs":10,"tls_insecure":true}},"cameras":[{{"area_mask":"{}"}}],"dev":{{"demo_mode":true,"storage_limit_mb":64}}}}"#,
+            r#"{{"schema_version":1,"nvr":{{"base_url":"https://example.invalid","username":"test","password":"secret","auth":"digest","connect_timeout_secs":5,"session_timeout_secs":10,"tls_insecure":true}},"cameras":[{{"area_mask":"{}"}}],"dev":{{"demo_mode":true,"storage_limit_mb":64}},"esp32":{{"wifi":{{"ssid":"ExampleWiFi","password":"example-password"}}}}}}"#,
             "0".repeat(160)
         );
         std::fs::write(&path, source).unwrap();
@@ -938,6 +956,8 @@ mod camera_settings_tests {
         assert_eq!(saved["nvr"]["base_url"], "https://example.invalid");
         assert_eq!(saved["dev"]["demo_mode"], true);
         assert_eq!(saved["dev"]["storage_limit_mb"], 64);
+        assert_eq!(saved["esp32"]["wifi"]["ssid"], "ExampleWiFi");
+        assert_eq!(saved["esp32"]["wifi"]["password"], "example-password");
         assert_eq!(saved["cameras"][0].as_object().unwrap().len(), 2);
         assert_eq!(saved["cameras"][0]["camera_id"], "Furtka");
         assert_eq!(
@@ -949,6 +969,28 @@ mod camera_settings_tests {
         assert!(text.find("\"nvr\"").unwrap() < text.find("\"schedule\"").unwrap());
         assert!(text.find("\"schedule\"").unwrap() < text.find("\"cameras\"").unwrap());
         assert!(text.find("\"cameras\"").unwrap() < text.find("\"dev\"").unwrap());
+        assert!(text.find("\"dev\"").unwrap() < text.find("\"esp32\"").unwrap());
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn saving_schedule_preserves_esp32_wifi_settings() {
+        let path = std::env::temp_dir().join(format!(
+            "pager-schedule-settings-{}-{}.json",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("test")
+        ));
+        let source = format!(
+            r#"{{"schema_version":1,"nvr":{{"base_url":"https://example.invalid","username":"test","password":"secret","auth":"digest","connect_timeout_secs":5,"session_timeout_secs":10,"tls_insecure":true}},"cameras":[],"esp32":{{"wifi":{{"ssid":"ExampleWiFi","password":"example-password"}}}}}}"#
+        );
+        std::fs::write(&path, source).unwrap();
+
+        Config::save_schedule(&path, &ScheduleSettings::default()).unwrap();
+
+        let saved: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(saved["esp32"]["wifi"]["ssid"], "ExampleWiFi");
+        assert_eq!(saved["esp32"]["wifi"]["password"], "example-password");
         let _ = std::fs::remove_file(path);
     }
 
