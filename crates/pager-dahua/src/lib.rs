@@ -232,7 +232,7 @@ impl CameraSettings {
             return Err(Error::Config);
         }
         let mut mask = Vec::with_capacity(AREA_MASK_BITS);
-        for pair in encoded.as_bytes().chunks_exact(2) {
+        for pair in encoded.as_bytes().as_chunks::<2>().0 {
             let pair = std::str::from_utf8(pair).map_err(|_| Error::Config)?;
             let byte = u8::from_str_radix(pair, 16).map_err(|_| Error::Config)?;
             for bit in 0..8 {
@@ -980,9 +980,7 @@ mod camera_settings_tests {
             std::process::id(),
             std::thread::current().name().unwrap_or("test")
         ));
-        let source = format!(
-            r#"{{"schema_version":1,"nvr":{{"base_url":"https://example.invalid","username":"test","password":"secret","auth":"digest","connect_timeout_secs":5,"session_timeout_secs":10,"tls_insecure":true}},"cameras":[],"esp32":{{"wifi":{{"ssid":"ExampleWiFi","password":"example-password"}}}}}}"#
-        );
+        let source = r#"{"schema_version":1,"nvr":{"base_url":"https://example.invalid","username":"test","password":"secret","auth":"digest","connect_timeout_secs":5,"session_timeout_secs":10,"tls_insecure":true},"cameras":[],"esp32":{"wifi":{"ssid":"ExampleWiFi","password":"example-password"}}}"#.to_owned();
         std::fs::write(&path, source).unwrap();
 
         Config::save_schedule(&path, &ScheduleSettings::default()).unwrap();
