@@ -3,6 +3,56 @@ pub const AUDIO_LIMIT_MS: u64 = 300_000;
 pub const QUEUE_LIMIT: usize = 128;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WifiConfigError {
+    InvalidJson,
+    MissingWifiSection,
+    MissingSsid,
+    MissingPassword,
+    SsidTooLong,
+    PasswordTooLong,
+}
+
+impl std::fmt::Display for WifiConfigError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::InvalidJson => "configuration is not valid JSON",
+            Self::MissingWifiSection => "configuration is missing esp32.wifi",
+            Self::MissingSsid => "configuration is missing esp32.wifi.ssid",
+            Self::MissingPassword => "configuration is missing esp32.wifi.password",
+            Self::SsidTooLong => "configured Wi-Fi SSID exceeds 32 bytes",
+            Self::PasswordTooLong => "configured Wi-Fi password exceeds 63 bytes",
+        })
+    }
+}
+
+/// Parse Wi-Fi credentials without including their values in errors or debug output.
+pub fn parse_wifi_credentials(json: &str) -> Result<(String, String), WifiConfigError> {
+    let config: serde_json::Value =
+        serde_json::from_str(json).map_err(|_| WifiConfigError::InvalidJson)?;
+    let wifi = config
+        .pointer("/esp32/wifi")
+        .ok_or(WifiConfigError::MissingWifiSection)?;
+    let ssid = wifi
+        .get("ssid")
+        .and_then(serde_json::Value::as_str)
+        .filter(|ssid| !ssid.trim().is_empty())
+        .ok_or(WifiConfigError::MissingSsid)?;
+    let password = wifi
+        .get("password")
+        .and_then(serde_json::Value::as_str)
+        .ok_or(WifiConfigError::MissingPassword)?;
+
+    if ssid.len() > 32 {
+        return Err(WifiConfigError::SsidTooLong);
+    }
+    if password.len() > 63 {
+        return Err(WifiConfigError::PasswordTooLong);
+    }
+
+    Ok((ssid.to_owned(), password.to_owned()))
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
     Armed,
     Muted,
@@ -143,6 +193,88 @@ impl Pager {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn wifi_config(ssid: &str, password: &str) -> String {
+        serde_json::json!({
+            "esp32": { "wifi": { "ssid": ssid, "password": password } }
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn wifi_credentials_are_read_from_esp32_section() {
+        let config = wifi_config("ExampleNetwork", "example-password");
+        assert_eq!(
+            parse_wifi_credentials(&config),
+            Ok(("ExampleNetwork".into(), "example-password".into()))
+        );
+    }
+
+    #[test]
+    fn wifi_credentials_allow_an_empty_password_for_open_networks() {
+        let config = wifi_config("OpenNetwork", "");
+        assert_eq!(
+            parse_wifi_credentials(&config),
+            Ok(("OpenNetwork".into(), String::new()))
+        );
+    }
+
+    #[test]
+    fn wifi_credentials_reject_invalid_json_and_missing_fields() {
+        assert_eq!(
+            parse_wifi_credentials("not-json"),
+            Err(WifiConfigError::InvalidJson)
+        );
+        assert_eq!(
+            parse_wifi_credentials("{}"),
+            Err(WifiConfigError::MissingWifiSection)
+        );
+        assert_eq!(
+            parse_wifi_credentials(
+                r#"{"esp32":{"wifi":{"password":"x"}}}"#
+            ),
+            Err(WifiConfigError::MissingSsid)
+        );
+        assert_eq!(
+            parse_wifi_credentials(
+                r#"{"esp32":{"wifi":{"ssid":"Example"}}}"#
+            ),
+            Err(WifiConfigError::MissingPassword)
+        );
+        assert_eq!(
+            parse_wifi_credentials(
+                r#"{"esp32":{"wifi":{"ssid":"  ","password":"x"}}}"#
+            ),
+            Err(WifiConfigError::MissingSsid)
+        );
+    }
+
+    #[test]
+    fn wifi_credentials_accept_exact_byte_limits() {
+        let config = wifi_config(&"s".repeat(32), &"p".repeat(63));
+        let (ssid, password) = parse_wifi_credentials(&config).unwrap();
+        assert_eq!(ssid.len(), 32);
+        assert_eq!(password.len(), 63);
+    }
+
+    #[test]
+    fn wifi_credentials_enforce_byte_limits_without_echoing_values() {
+        let long_ssid = wifi_config(&"s".repeat(33), "password");
+        let error = parse_wifi_credentials(&long_ssid).unwrap_err();
+        assert_eq!(error, WifiConfigError::SsidTooLong);
+
+        let multibyte_ssid = wifi_config(&"é".repeat(17), "password");
+        assert_eq!(
+            parse_wifi_credentials(&multibyte_ssid),
+            Err(WifiConfigError::SsidTooLong)
+        );
+
+        let long_password = wifi_config("Example", &"p".repeat(64));
+        let error = parse_wifi_credentials(&long_password).unwrap_err();
+        assert_eq!(error, WifiConfigError::PasswordTooLong);
+        assert!(!error.to_string().contains(&"p".repeat(64)));
+    }
+
     #[test]
     fn concurrent_alarm_does_not_extend_deadline() {
         let mut p = Pager::default();

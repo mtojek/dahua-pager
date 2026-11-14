@@ -136,27 +136,8 @@ impl WifiConnection {
 fn load_credentials() -> Result<(String, String), String> {
     let contents = fs::read_to_string(CONFIG_PATH)
         .map_err(|error| format!("could not read {CONFIG_PATH}: {error}"))?;
-    let config: serde_json::Value = serde_json::from_str(&contents)
-        .map_err(|error| format!("{CONFIG_PATH} is not valid JSON: {error}"))?;
-    let wifi = config
-        .pointer("/esp32/wifi")
-        .ok_or_else(|| "config is missing esp32.wifi".to_owned())?;
-    let ssid = wifi
-        .get("ssid")
-        .and_then(serde_json::Value::as_str)
-        .filter(|ssid| !ssid.trim().is_empty())
-        .ok_or_else(|| "config is missing esp32.wifi.ssid".to_owned())?;
-    let password = wifi
-        .get("password")
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| "config is missing esp32.wifi.password".to_owned())?;
-
-    if ssid.len() > 32 {
-        return Err("configured Wi-Fi SSID exceeds 32 bytes".into());
-    }
-    if password.len() > 63 {
-        return Err("configured Wi-Fi password exceeds 63 bytes".into());
-    }
+    let credentials = pager_core::parse_wifi_credentials(&contents)
+        .map_err(|error| format!("{CONFIG_PATH}: {error}"))?;
     log::info!("[WIFI] local credentials found on SD; values hidden");
-    Ok((ssid.to_owned(), password.to_owned()))
+    Ok(credentials)
 }
