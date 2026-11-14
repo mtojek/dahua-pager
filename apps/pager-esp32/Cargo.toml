@@ -19,6 +19,7 @@ opt-level = "z"
 [dependencies]
 log = "0.4"
 esp-idf-svc = "0.53"
+serde_json = "1"
 embedded-graphics = "0.8.2"
 pager-core = { path = "../../crates/pager-core" }
 pager-ui = { path = "../../crates/pager-ui" }

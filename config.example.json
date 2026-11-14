@@ -21,5 +21,11 @@
   "dev": {
     "demo_mode": false,
     "storage_limit_mb": 64
+  },
+  "esp32": {
+    "wifi": {
+      "ssid": "ExampleWiFi",
+      "password": "replace-with-your-wifi-password"
+    }
   }
 }

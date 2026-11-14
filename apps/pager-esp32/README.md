@@ -10,6 +10,10 @@ ported yet. Hardware details and
 the implementation sequence are in
 [`docs/esp32-port-plan.md`](../../docs/esp32-port-plan.md).
 
+For the Wi-Fi diagnostic, place `config.esp32.json` at the root of the SD card with
+`esp32.wifi.ssid` and `esp32.wifi.password` set. The firmware reports link
+changes and reconnect attempts without logging either value.
+
 ## Build
 
 Install `espup`, then install the Xtensa toolchain and the build tools:

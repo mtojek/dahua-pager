@@ -3,19 +3,21 @@ mod inputs;
 mod lcd;
 mod leds;
 mod storage;
+mod wifi;
 
 fn main() {
     // Required so esp-idf-sys runtime patches are linked into the firmware.
     esp_idf_svc::sys::link_patches();
 
     esp_idf_svc::log::EspLogger::initialize_default();
+    quiet_wifi_driver_logs();
 
     log::info!("[APP] Dahua Pager starting");
     log::info!("[APP] firmware version={}", env!("CARGO_PKG_VERSION"));
     log::info!("[APP] target=ESP32-S3; ESP-IDF=v6.1");
     log::info!("[INIT] ESP-IDF Rust logger initialized");
     log::info!("[INIT] pager-core, pager-ui, and pager-dahua are build dependencies");
-    log::warn!("[INIT] Wi-Fi is not initialized yet");
+    log::info!("[INIT] Wi-Fi station monitoring enabled when SD config is present");
 
     let peripherals = match esp_idf_svc::hal::peripherals::Peripherals::take() {
         Ok(peripherals) => peripherals,
@@ -138,6 +140,14 @@ fn main() {
 
     log::info!("[APP] startup complete; LCD test screen active");
 
+    let mut wifi = match wifi::WifiConnection::start(peripherals.modem) {
+        Ok(wifi) => Some(wifi),
+        Err(error) => {
+            log::warn!("[WIFI] connection unavailable: {error}");
+            None
+        }
+    };
+
     let started_at = std::time::Instant::now();
     let mut last_heartbeat = started_at;
     let mut last_axis_log = started_at;
@@ -158,6 +168,10 @@ fn main() {
     log::info!("[JOYSTICK] initial raw ADC values x={last_x} y={last_y}; move stick to test");
 
     loop {
+        if let Some(wifi) = &mut wifi {
+            wifi.poll();
+        }
+
         for (button_index, button) in buttons.iter_mut().enumerate() {
             if button.poll() {
                 if let Some(audio) = &mut button_audio {
@@ -208,5 +222,23 @@ fn main() {
         }
 
         esp_idf_svc::hal::delay::FreeRtos::delay_ms(10);
+    }
+}
+
+fn quiet_wifi_driver_logs() {
+    // Keep the pager's concise [WIFI] status logs while suppressing verbose
+    // ESP-IDF driver output, which can include the network name and IP address.
+    unsafe {
+        let error_level = esp_idf_svc::sys::esp_log_level_t_ESP_LOG_ERROR;
+        for tag in [
+            c"wifi",
+            c"wifi_init",
+            c"phy_init",
+            c"pp",
+            c"net80211",
+            c"sdspi_transaction",
+        ] {
+            esp_idf_svc::sys::esp_log_level_set(tag.as_ptr(), error_level);
+        }
     }
 }
