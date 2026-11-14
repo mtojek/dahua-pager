@@ -4,6 +4,9 @@ version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 
+[features]
+live-nvr-tests = []
+
 [dependencies]
 minifb = "0.29.0"
 embedded-graphics.workspace = true

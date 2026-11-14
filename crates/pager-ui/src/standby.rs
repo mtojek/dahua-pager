@@ -1538,6 +1538,8 @@ fn text<D: DrawTarget<Color = Rgb565>>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{RENDER_TILE_HEIGHT, RENDER_TILE_PIXELS, Rgb565Tile};
+
     #[test]
     fn modes_and_navigation_work_without_replaying_alarms() {
         let mut ui = Ui::default();
@@ -1680,6 +1682,34 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn tiled_render_matches_full_screen_render() {
+        let ui = Ui::default();
+        let pager = Pager::default();
+        let mut reference = Canvas(vec![Rgb565::BLACK; 480 * 320]);
+        ui.render(
+            &mut reference,
+            &pager,
+            ConnectionStatus::Connecting,
+            "22:15",
+        )
+        .unwrap();
+
+        let mut tiled_frame = vec![Rgb565::BLACK; 480 * 320];
+        for row_start in (0_usize..320).step_by(RENDER_TILE_HEIGHT as usize) {
+            let mut pixels = vec![Rgb565::BLACK; RENDER_TILE_PIXELS];
+            let mut tile = Rgb565Tile::new(&mut pixels, row_start as u32).unwrap();
+            ui.render(&mut tile, &pager, ConnectionStatus::Connecting, "22:15")
+                .unwrap();
+
+            let start = row_start * 480;
+            let end = start + RENDER_TILE_HEIGHT as usize * 480;
+            tiled_frame[start..end].copy_from_slice(&pixels);
+        }
+
+        assert_eq!(tiled_frame, reference.0);
     }
 
     #[test]

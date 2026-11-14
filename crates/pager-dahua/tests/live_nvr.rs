@@ -1,5 +1,6 @@
-//! Explicit live communication E2E. Never run against real hardware by default.
+//! Explicit live communication E2E; enable with `--features live-nvr-tests`.
 //! Credentials, URLs, camera labels and raw NVR responses must stay out of output.
+//! Run with: `cargo test -p pager-dahua --features live-nvr-tests --test live_nvr`.
 use pager_dahua::{Config, DahuaClient, Message};
 use std::path::PathBuf;
 
@@ -13,7 +14,6 @@ fn local_config() -> Config {
 }
 
 #[test]
-#[ignore = "requires explicit authorization and a private local NVR configuration"]
 fn live_https_digest_event_stream() {
     let mut config = local_config();
     config.nvr.session_timeout_secs = 25;
@@ -81,7 +81,6 @@ fn live_https_digest_event_stream() {
 }
 
 #[test]
-#[ignore = "requires explicit authorization and a private local NVR configuration"]
 fn live_camera_snapshots() {
     let mut config = local_config();
     config.nvr.session_timeout_secs = 10;
@@ -104,7 +103,6 @@ fn live_camera_snapshots() {
 }
 
 #[test]
-#[ignore = "requires explicit authorization and a private local NVR configuration"]
 fn live_camera_names() {
     let mut config = local_config();
     config.nvr.session_timeout_secs = 10;
@@ -124,7 +122,6 @@ fn live_camera_names() {
 }
 
 #[test]
-#[ignore = "requires explicit authorization and a private local NVR configuration"]
 fn live_cancellable_subscription() {
     let config = local_config();
     let subscription = DahuaClient::new(config.nvr)

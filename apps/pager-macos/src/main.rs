@@ -1590,8 +1590,9 @@ mod status_tests {
         assert_eq!(intersecting_area_rectangle(&ui, 6, &[inside]), None);
     }
 
+    /// Requires a local NVR config and the `live-nvr-tests` feature.
     #[test]
-    #[ignore = "requires explicit authorization and a private local NVR configuration"]
+    #[cfg(feature = "live-nvr-tests")]
     fn live_nvr_snapshots_decode_for_area_editor() {
         let config_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config.local.json");
         let config = Config::load(config_path).unwrap();

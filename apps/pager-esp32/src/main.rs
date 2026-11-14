@@ -5,6 +5,10 @@ mod leds;
 mod storage;
 mod wifi;
 
+use embedded_graphics::{pixelcolor::Rgb565, prelude::RgbColor};
+use pager_core::Pager;
+use pager_ui::{ConnectionStatus, Ui, RENDER_TILE_PIXELS};
+
 fn main() {
     // Required so esp-idf-sys runtime patches are linked into the firmware.
     esp_idf_svc::sys::link_patches();
@@ -133,12 +137,30 @@ fn main() {
             return;
         }
     };
-    if let Err(error) = display.initialize_and_show_test_pattern() {
-        log::error!("[LCD] initialization or test pattern failed: {error}");
+    if let Err(error) = display.initialize() {
+        log::error!("[LCD] initialization failed: {error}");
         return;
     }
 
-    log::info!("[APP] startup complete; LCD test screen active");
+    let ui = Ui::default();
+    let pager = Pager::default();
+    let mut tile_buffer: Box<[Rgb565; RENDER_TILE_PIXELS]> =
+        vec![Rgb565::BLACK; RENDER_TILE_PIXELS]
+            .into_boxed_slice()
+            .try_into()
+            .expect("allocated buffer has the requested tile size");
+    if let Err(error) = display.render_ui(
+        &ui,
+        &pager,
+        ConnectionStatus::NoConfig,
+        "--:--",
+        &mut tile_buffer,
+    ) {
+        log::error!("[LCD] shared pager UI render failed: {error}");
+        return;
+    }
+
+    log::info!("[APP] startup complete; shared pager standby displayed");
 
     let mut wifi = match wifi::WifiConnection::start(peripherals.modem) {
         Ok(wifi) => Some(wifi),

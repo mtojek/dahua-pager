@@ -1,5 +1,6 @@
 //! Minimal ILI9488 bring-up for the LOLIN S3 display wiring from `crd-esp32`.
 
+use embedded_graphics::{pixelcolor::Rgb565, prelude::RgbColor};
 use esp_idf_svc::{
     hal::{
         delay::FreeRtos,
@@ -9,6 +10,8 @@ use esp_idf_svc::{
     },
     sys::EspError,
 };
+use pager_core::Pager;
+use pager_ui::{ConnectionStatus, Rgb565Tile, Ui, RENDER_TILE_HEIGHT, RENDER_TILE_PIXELS};
 use std::sync::Arc;
 
 const WIDTH: usize = 480;
@@ -62,11 +65,7 @@ impl<'d> Lcd<'d> {
             Option::<AnyOutputPin>::None,
             &lcd_config,
         )?;
-        let touch_spi = SpiDeviceDriver::new(
-            driver,
-            Option::<AnyOutputPin>::None,
-            &touch_config,
-        )?;
+        let touch_spi = SpiDeviceDriver::new(driver, Option::<AnyOutputPin>::None, &touch_config)?;
 
         let mut cs = PinDriver::output(cs_pin)?;
         let mut dc = PinDriver::output(dc_pin)?;
@@ -151,9 +150,9 @@ impl<'d> Lcd<'d> {
 
         let x = map_clamped(raw_y, TOUCH_MIN, TOUCH_MAX, (WIDTH - 1) as i32, 0);
         let y = map_clamped(raw_x, TOUCH_MIN, TOUCH_MAX, 0, (HEIGHT - 1) as i32);
-        let should_log = self.last_touch_log.is_none_or(|(last_x, last_y)| {
-            (x - last_x).abs() >= 8 || (y - last_y).abs() >= 8
-        });
+        let should_log = self
+            .last_touch_log
+            .is_none_or(|(last_x, last_y)| (x - last_x).abs() >= 8 || (y - last_y).abs() >= 8);
         if should_log {
             log::info!(
                 "[TOUCH] PRESSED raw_x={} raw_y={} -> screen_x={} screen_y={}",
@@ -174,7 +173,7 @@ impl<'d> Lcd<'d> {
         Ok((u16::from_be_bytes(response) >> 3) & 0x0FFF)
     }
 
-    pub fn initialize_and_show_test_pattern(&mut self) -> Result<(), EspError> {
+    pub fn initialize(&mut self) -> Result<(), EspError> {
         log::info!("[LCD] resetting ILI9488; pins CS=3 DC=10 RST=9 BL=14 SCK=12 MOSI=11");
         self.backlight.set_low()?;
         self.reset.set_high()?;
@@ -190,9 +189,31 @@ impl<'d> Lcd<'d> {
         );
         self.initialize_panel()?;
         self.backlight.set_high()?;
-        log::info!("[LCD] panel initialized; drawing RGB color bars (480x320)");
-        self.draw_test_pattern()?;
-        log::info!("[LCD] color bar test pattern displayed");
+        log::info!("[LCD] panel initialized; ready for pager UI");
+        Ok(())
+    }
+
+    /// Render the shared UI through a bounded row buffer instead of a full frame buffer.
+    pub fn render_ui(
+        &mut self,
+        ui: &Ui,
+        pager: &Pager,
+        connection: ConnectionStatus,
+        time: &str,
+        tile_buffer: &mut [Rgb565; RENDER_TILE_PIXELS],
+    ) -> Result<(), EspError> {
+        for row_start in (0..HEIGHT).step_by(RENDER_TILE_HEIGHT as usize) {
+            {
+                let mut tile = Rgb565Tile::new(tile_buffer, row_start as u32)
+                    .expect("LCD tile geometry is fixed and validated");
+                match ui.render(&mut tile, pager, connection, time) {
+                    Ok(()) => {}
+                    Err(never) => match never {},
+                }
+            }
+            self.write_rgb565_tile(row_start, tile_buffer)?;
+        }
+
         Ok(())
     }
 
@@ -212,15 +233,15 @@ impl<'d> Lcd<'d> {
         self.command_data(
             0xE0,
             &[
-                0x00, 0x07, 0x0B, 0x03, 0x0F, 0x05, 0x30, 0x56, 0x47, 0x04, 0x0B, 0x0A, 0x2D,
-                0x37, 0x0F,
+                0x00, 0x07, 0x0B, 0x03, 0x0F, 0x05, 0x30, 0x56, 0x47, 0x04, 0x0B, 0x0A, 0x2D, 0x37,
+                0x0F,
             ],
         )?;
         self.command_data(
             0xE1,
             &[
-                0x00, 0x0E, 0x13, 0x04, 0x11, 0x07, 0x39, 0x45, 0x50, 0x07, 0x10, 0x0D, 0x32,
-                0x36, 0x0F,
+                0x00, 0x0E, 0x13, 0x04, 0x11, 0x07, 0x39, 0x45, 0x50, 0x07, 0x10, 0x0D, 0x32, 0x36,
+                0x0F,
             ],
         )?;
         self.command(0x11)?; // Sleep out
@@ -254,37 +275,29 @@ impl<'d> Lcd<'d> {
     fn set_window(&mut self, x0: u16, y0: u16, x1: u16, y1: u16) -> Result<(), EspError> {
         self.command_data(
             0x2A,
-            &[
-                (x0 >> 8) as u8,
-                x0 as u8,
-                (x1 >> 8) as u8,
-                x1 as u8,
-            ],
+            &[(x0 >> 8) as u8, x0 as u8, (x1 >> 8) as u8, x1 as u8],
         )?;
         self.command_data(
             0x2B,
-            &[
-                (y0 >> 8) as u8,
-                y0 as u8,
-                (y1 >> 8) as u8,
-                y1 as u8,
-            ],
+            &[(y0 >> 8) as u8, y0 as u8, (y1 >> 8) as u8, y1 as u8],
         )?;
         self.command(0x2C)
     }
 
-    fn fill_rect(&mut self, y0: usize, y1: usize, rgb666: [u8; 3]) -> Result<(), EspError> {
+    fn write_rgb565_tile(&mut self, y0: usize, pixels: &[Rgb565]) -> Result<(), EspError> {
+        let y1 = y0 + RENDER_TILE_HEIGHT as usize;
         self.set_window(0, y0 as u16, (WIDTH - 1) as u16, (y1 - 1) as u16)?;
 
         let mut scanline = [0_u8; WIDTH * 3];
-        for pixel in scanline.chunks_exact_mut(3) {
-            pixel.copy_from_slice(&rgb666);
-        }
-
         self.cs.set_low()?;
         let result = (|| {
             self.dc.set_high()?;
-            for _ in y0..y1 {
+            for row in pixels.chunks_exact(WIDTH) {
+                for (pixel_index, pixel) in row.iter().enumerate() {
+                    scanline[pixel_index * 3] = pixel.r() << 3;
+                    scanline[pixel_index * 3 + 1] = pixel.g() << 2;
+                    scanline[pixel_index * 3 + 2] = pixel.b() << 3;
+                }
                 self.spi.write(&scanline)?;
             }
             Ok(())
@@ -294,32 +307,15 @@ impl<'d> Lcd<'d> {
         release_result?;
         Ok(())
     }
-
-    fn draw_test_pattern(&mut self) -> Result<(), EspError> {
-        let band_height = HEIGHT / 5;
-        for (index, color) in [
-            [0xFC, 0xFC, 0xFC], // White
-            [0xFC, 0x00, 0x00], // Red
-            [0x00, 0xFC, 0x00], // Green
-            [0x00, 0x00, 0xFC], // Blue
-            [0x00, 0x00, 0x00], // Black
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            let y0 = index * band_height;
-            let y1 = if index == 4 {
-                HEIGHT
-            } else {
-                (index + 1) * band_height
-            };
-            self.fill_rect(y0, y1, color)?;
-        }
-        Ok(())
-    }
 }
 
-fn map_clamped(value: u16, input_min: u16, input_max: u16, output_min: i32, output_max: i32) -> i32 {
+fn map_clamped(
+    value: u16,
+    input_min: u16,
+    input_max: u16,
+    output_min: i32,
+    output_max: i32,
+) -> i32 {
     let value = value.clamp(input_min, input_max);
     let input_span = i64::from(input_max - input_min);
     let output_span = i64::from(output_max - output_min);

@@ -15,9 +15,7 @@ use std::{
 const SD_SPI_KHZ: u32 = 4_000;
 const TEST_CONTENT: &[u8] = b"dahua-pager-sd-self-test-v1\n";
 
-type MountedSdFat = MountedFatfs<
-    Fatfs<SdCardDriver<SdSpiHostDriver<'static, SpiDriver<'static>>>>,
->;
+type MountedSdFat = MountedFatfs<Fatfs<SdCardDriver<SdSpiHostDriver<'static, SpiDriver<'static>>>>>;
 
 /// Keeps the SD-SPI host and FAT filesystem mounted for the firmware lifetime.
 pub struct Storage {
@@ -96,8 +94,8 @@ pub fn run_sd_self_test(
         drop(file);
         log::info!("[STORAGE] test file written; bytes={}", TEST_CONTENT.len());
 
-        let mut file = File::open(&path)
-            .map_err(|error| format!("test file reopen failed: {error}"))?;
+        let mut file =
+            File::open(&path).map_err(|error| format!("test file reopen failed: {error}"))?;
         let mut content = Vec::new();
         file.read_to_end(&mut content)
             .map_err(|error| format!("test file read failed: {error}"))?;
@@ -108,7 +106,10 @@ pub fn run_sd_self_test(
                 content.len()
             ));
         }
-        log::info!("[STORAGE] test file read and verified; bytes={}", content.len());
+        log::info!(
+            "[STORAGE] test file read and verified; bytes={}",
+            content.len()
+        );
         Ok(())
     })();
 
@@ -127,14 +128,17 @@ pub fn run_sd_self_test(
 
 fn create_test_file(stamp: u32) -> Result<(String, File), String> {
     for attempt in 0..32_u32 {
-        let path = format!("/sdcard/PG{:06X}.TMP", stamp.wrapping_add(attempt) & 0x00FF_FFFF);
+        let path = format!(
+            "/sdcard/PG{:06X}.TMP",
+            stamp.wrapping_add(attempt) & 0x00FF_FFFF
+        );
         match fs::symlink_metadata(&path) {
             Ok(_) => continue,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(format!("test file path check failed: {error}")),
         }
-        let file = File::create(&path)
-            .map_err(|error| format!("test file create failed: {error}"))?;
+        let file =
+            File::create(&path).map_err(|error| format!("test file create failed: {error}"))?;
         return Ok((path, file));
     }
     Err("could not find an unused temporary test filename".into())
