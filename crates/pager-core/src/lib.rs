@@ -230,21 +230,15 @@ mod tests {
             Err(WifiConfigError::MissingWifiSection)
         );
         assert_eq!(
-            parse_wifi_credentials(
-                r#"{"esp32":{"wifi":{"password":"x"}}}"#
-            ),
+            parse_wifi_credentials(r#"{"esp32":{"wifi":{"password":"x"}}}"#),
             Err(WifiConfigError::MissingSsid)
         );
         assert_eq!(
-            parse_wifi_credentials(
-                r#"{"esp32":{"wifi":{"ssid":"Example"}}}"#
-            ),
+            parse_wifi_credentials(r#"{"esp32":{"wifi":{"ssid":"Example"}}}"#),
             Err(WifiConfigError::MissingPassword)
         );
         assert_eq!(
-            parse_wifi_credentials(
-                r#"{"esp32":{"wifi":{"ssid":"  ","password":"x"}}}"#
-            ),
+            parse_wifi_credentials(r#"{"esp32":{"wifi":{"ssid":"  ","password":"x"}}}"#),
             Err(WifiConfigError::MissingSsid)
         );
     }
